@@ -1,12 +1,12 @@
-# New API → ACG 实施计划（对应 design v3.2）
+# New API → ACG 实施计划（对应 design v3.3）
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> 只有 Task 0、M0、M1 已细化到可直接执行的步骤。M2～M5 是任务级路线图：开始某个里程碑前，先用 superpowers:writing-plans 写出 `docs/plans/<日期>-mN-<主题>.md` 细化计划，再执行。不要直接按路线图条目编码。
+> 只有“工程初始化”“表结构与能力核对”“服务骨架”三个阶段已细化到可直接执行的步骤。后面的阶段（MySQL 全量迁移、binlog 增量同步、定期核对与运维、对接真实 ACG）是任务级路线图：开工前先用 superpowers:writing-plans 写出 `docs/plans/<日期>-<功能名>.md` 细化计划，再执行。不要直接按路线图条目编码。
 
-**Goal:** 按 `design-v3.2.md` 实现迁移服务。先交付可验证的 MySQL 全量与增量闭环，再补齐其他读取器、运维能力与真实 ACG 适配器。
+**Goal:** 按 `design-v3.3.md` 实现迁移服务。先交付可验证的 MySQL 全量与增量闭环，再补齐其他读取器、运维能力与真实 ACG 适配器。
 
-**Architecture:** 读取、镜像世代、声明式映射、逻辑资源、收敛器、目标适配器分层。消费者按源事务在短 PG 事务中更新镜像、依赖索引、待收敛集合和 GTID 位点；收敛器按资源单元重算期望，先登记操作意图再写目标，最后记录结果。全量、增量、重试、热加载和对账修复共用这一套提交协议（design 9.1、11.3）。
+**Architecture:** 读取 → 转换 → 写入。读取：首次全量一致性读，之后以 MySQL 从库身份订阅 binlog。binlog 消费者由每行变更前后的值确定受影响的 ACG 资源，与 binlog 位置一起写入待写入队列；写入器回源 MySQL 查询这些资源当前的数据，转换后与上次写入内容比较，有变化才通过 ACG 管理接口写入，写前登记、写后记录结果。服务不保存 New API 数据副本（design 二、9.6、11.3）。
 
 **Tech Stack:** Go；PostgreSQL；CEL（cel-go）；YAML + JSON Schema；MySQL ROW/FULL/GTID；go-mysql-org/go-mysql replication 与 TiDB parser；Docker Compose；Kubernetes。依赖版本在 Task 0 验证并锁定，本计划不写死版本号。
 
@@ -14,7 +14,7 @@
 
 ## 1. 范围与约定
 
-**依据：** `design-v3.2.md`。v3.1 评审中发现的问题（快照世代、G0/G1 追平、影子世代对账、提交协议解耦、撤权先于授权、令牌与用户状态、多实例冲突、密钥版本校验、密码只初始化一次）已全部并入 v3.2，本计划不再重复论证，只引用章节。
+**依据：** `design-v3.3.md`。v3.1 评审发现的问题（撤权先于授权、令牌与用户状态、多实例冲突、密码只初始化一次、写入崩溃恢复等）已并入设计；v3.3 去掉了 v3.2 的“PG 中保存源数据副本”做法。本计划只引用章节，不重复论证。
 
 **本期迁移：** 分组、渠道、用户、apikey 及授权。不迁移额度、计费、日志、历史用量、系统访问令牌和源密码哈希。PostgreSQL、SQLite、管理 API 全量读取属于本期，排在 MySQL 闭环之后。PostgreSQL CDC、LiteLLM、Higress、多实例共享聚合路由不在本期。
 
@@ -31,19 +31,19 @@
 
 - 测试文件与被测文件同目录，`_test.go` 后缀；测试只断言外部行为，不断言内部调用次数。
 - build tag：默认单元测试无 tag；需要 PG 或 MySQL 的用 `integration`；需要完整 compose 环境的用 `e2e`；需要真实 ACG 的用 `acg`。
-- golden 期望由人工按源端语义编写，或由独立的参考算法生成，不由被测代码生成后回写。
+- 固定样例的期望结果由人工按源端语义编写，或由独立的参考算法生成，不由被测代码生成后回写。
 
 ## 2. 开工前提
 
 | 前提 | 阻塞范围 | 负责 |
 | --- | --- | --- |
-| 实际部署的 New API 分支与版本（官方或定制版，见 2026-10-29 会议） | M0 及之后所有涉及表结构的任务 | 业务方 |
-| 生产库脱敏的表结构与样例 | M0 Task 0.2、0.4 | DBA / 业务方 |
-| MySQL binlog 配置能否满足 design 9.2，第二个 server\_id | M3 | DBA |
-| ACG 能力逐项结论（design 7.3） | M5；M1～M4 不阻塞 | ACG 团队 |
+| 实际部署的 New API 分支与版本（官方或定制版，见 2026-10-29 会议） | 表结构与能力核对阶段及之后所有涉及表结构的任务 | 业务方 |
+| 生产库脱敏的表结构与样例 | 表结构与能力核对阶段的任务 0.2、0.4 | DBA / 业务方 |
+| MySQL binlog 配置能否满足 design 9.2，第二个 server\_id | binlog 增量同步阶段 | DBA |
+| ACG 能力逐项结论（design 7.3） | 对接真实 ACG；之前各阶段不受阻塞 | ACG 团队 |
 | design 12.2 中的业务决策 | 对应策略的默认值；不阻塞编码，阻塞生产启用 | 业务方 |
 
-缺少前两项时，可以先完成 Task 0 和 M1；M2 以官方最新稳定版的表结构作为临时契约，待 M0 结论到位后修正。
+缺少前两项时，可以先完成工程初始化和服务骨架；MySQL 全量迁移以官方最新稳定版的表结构作为临时字段清单，待表结构核对结论到位后修正。
 
 ---
 
@@ -66,9 +66,9 @@
 
 ---
 
-## M0：契约核定
+## 表结构与能力核对
 
-M0 产出的是文档和测试数据，不写业务代码。
+这一阶段产出的是文档和测试数据，不写业务代码。
 
 ### Task 0.1：确认源端分支与版本
 
@@ -84,7 +84,7 @@ M0 产出的是文档和测试数据，不写业务代码。
 
 1. 采集三张表的完整列定义（类型、默认值、是否可空），写入文档。
 2. 从该版本源码中摘录渠道状态、用户状态、令牌状态、用户角色的全部取值及含义。
-3. 按 design 3.1 写出契约：每列要么声明，要么列入 `dropped` 并写原因。
+3. 按 design 3.1 写出字段清单：每列要么声明，要么列入 `dropped` 并写原因。
 4. 提交：`docs: capture New API schema and enums`。
 
 ### Task 0.3：验证授权语义
@@ -116,11 +116,11 @@ M0 产出的是文档和测试数据，不写业务代码。
 1. 按 design 7.3 与 12.2 逐项登记：已确认 / 待确认 / 不支持；未确认的一律写 `unknown`，不预设 `true`。
 2. 提交：`docs: register ACG capability status`。
 
-**M0 验收：** 契约中每个范围内的字段都有映射或 dropped 原因；额度和高级设置造成的行为损失都已写明；0.3 中的五个问题都有实测结论。
+**验收：** 字段清单中每个范围内的字段都有映射或 dropped 原因；额度和高级设置造成的行为损失都已写明；0.3 中的五个问题都有实测结论。
 
 ---
 
-## M1：骨架
+## 服务骨架
 
 ### Task 1.1：资源标识
 
@@ -185,7 +185,7 @@ M0 产出的是文档和测试数据，不写业务代码。
    - `TestMigrateFromEmpty`：空库执行后，design 8.7 列出的全部表存在。
    - `TestMigrateIdempotent`：重复执行不报错，不重复建表。
    - `TestNamingRegistryUnique`：同一 target + kind + 名称插入两次，违反唯一约束。
-2. 按 design 8.7 建表：`mirror_rows` 为通用表；除全局表外均带 `job_id`；`pending` 带入队版本号；`operations` 带状态；`id_map` 带 `password_initialized_at`。表结构迁移的实现方式（内嵌 SQL 自带执行器或第三方库）在本任务中确定并写入 README。
+2. 按 design 8.7 建表；除全局表外均带 `job_id`；`pending` 带入队版本号；`operations` 带状态；`id_map` 带 `password_initialized_at`。表结构迁移的实现方式（内嵌 SQL 自带执行器或第三方库）在本任务中确定并写入 README。
 3. `docker compose -f test/e2e/compose.yaml up -d postgres`；`go test -tags=integration ./internal/state/pg/...`，预期 PASS。
 4. 提交：`feat(state): add migrator schema`。
 
@@ -206,11 +206,11 @@ M0 产出的是文档和测试数据，不写业务代码。
 **创建：** `internal/state/{store,types}.go`、`internal/state/pg/store.go` 及集成测试
 
 1. 测试（`integration`）：
-   - `TestRollbackDoesNotAdvance`：在事务中应用镜像变更并推进位点后回滚，镜像与位点都不变。
-   - `TestMirrorAndCheckpointAtomic`：提交后镜像变更与位点同时可见。
+   - `TestRollbackDoesNotAdvance`：在事务中入队并推进 binlog 位置后回滚，队列与位置都不变。
+   - `TestEnqueueAndCheckpointAtomic`：提交后入队与位置同时可见。
    - `TestDequeueSkipsReenqueued`：取出 X（版本 1）后 X 再次入队（版本 2），按版本 1 出队不生效，X 仍在队列中。
    - `TestIntentVisibleAfterCommit`：登记的 pending 操作在新连接中可见。
-2. 实现 design 11.2 中 `StateTx` 的镜像、入队、位点、意图、结果、出队相关方法；本任务不实现映射。
+2. 实现 design 11.2 中 `StateTx` 的入队、位置、写入登记、结果、出队相关方法；本任务不实现映射。
 3. `go test -tags=integration ./internal/state/...`，预期 PASS。
 4. 提交：`feat(state): implement transactional state store`。
 
@@ -227,11 +227,11 @@ M0 产出的是文档和测试数据，不写业务代码。
 3. `go test ./internal/service/...` 与 `go test -tags=integration ./internal/service/...`，预期 PASS。
 4. 提交：`feat(service): add job state machine and runner`。
 
-### Task 1.9：目标接口与共用契约测试
+### Task 1.9：目标接口与共用接口测试
 
 **创建：** `internal/target/target.go`、`test/contract/target_contract.go`、`internal/target/memory/{target,routing}.go` 及测试
 
-1. 在 `test/contract` 中编写对任意 Target 都成立的契约测试函数，供各实现调用：
+1. 在 `test/contract` 中编写对任意 Target 都成立的接口测试函数，供各实现调用：
    - 同一幂等键重放不产生重复资源。
    - 同一来源标识的重放视为成功；被其他资源占用的名称或 key 返回冲突。
    - 一批变更中部分失败时，已成功项保留，结果按 OpID 关联。
@@ -251,7 +251,7 @@ M0 产出的是文档和测试数据，不写业务代码。
    - `TestFileOutputDeterministic`：相同输入两次输出字节一致。
    - `TestFileOutputRedacted`：输出中只有密钥指纹前 8 位，没有原值。
    - `TestFileWriteAtomic`：写入中途失败不留下半个文件。
-   - 调用 Task 1.9 的共用契约测试。
+   - 调用 Task 1.9 的共用接口测试。
 2. 实现：临时文件加原子重命名；文件目标的状态与真实目标按 target 隔离。
 3. `go test ./internal/target/file/... ./internal/report/...`，预期 PASS。
 4. 提交：`feat(target): add file target and report skeleton`。
@@ -274,68 +274,84 @@ M0 产出的是文档和测试数据，不写业务代码。
 3. `make leak-scan`，预期 PASS。
 4. 提交：`test: add secret leak gate`。
 
-**M1 验收：** 服务能启动、抢锁、推进空任务；重启后从 PG 恢复状态；双实例只有一个持锁；全部产物通过泄漏扫描。
+**验收：** 服务能启动、抢锁、推进空任务；重启后从 PG 恢复状态；双实例只有一个持锁；全部产物通过泄漏扫描。
 
 ---
 
-## M2：MySQL 全量闭环（开工前先写细化计划）
+## 纠偏：删除偏离 v3.3 的实现（MySQL 全量迁移开工前完成）
 
-目标：静态源的全量结果通过 golden 与等价校验，中断后续跑无重复资源。
+服务骨架阶段按 v3.2 实现了“PG 中保存源数据副本”的部分，v3.3 已取消该做法。这些代码直接删除，不保留兼容层（尚无任何部署，迁移脚本可以直接改）：
+
+| 删除或修改 | 位置 | 改为 |
+| --- | --- | --- |
+| 表 `mirror_rows`、`deps`、`generations`；`jobs.active_generation`；按副本版本分的 `checkpoints` | `internal/state/pg/migrations/001_init.sql` | `checkpoints` 每个任务一行：`g0`（全量开始位置）、`gtid_set`（增量已处理位置） |
+| `RowChange`、`MirrorRow` 类型；`ApplyMirror`、`ReadMirror` | `internal/state/{types,store}.go`、`internal/state/pg/store.go` 及其测试 | 删除 |
+| `Advance(gen, pos)`、`Position(gen)` | 同上 | `Advance(pos)`、`Position()`；新增 `SetFullSyncStart(g0)` |
+| 状态 `SNAPSHOTTING`、`CATCHING_UP` 及事件 `SnapshotCollected`、`ActivateStream`、`ActivatePoll` | `internal/service/state_machine.go`、表 `jobs` 的 CHECK 约束 | 状态 `FULL_SYNC`；事件 `PrecheckPassed`（→ FULL\_SYNC）、`FullSyncDone`（→ STREAMING）、`FullSyncDonePoll`（→ POLLING） |
+| 计划文件 `2026-11-04-mysql-full-read.md` 中的副本版本、存副本任务 | `docs/plans/` | 重写为“读取：从 MySQL 全量读出与按条件查询 New API 数据” |
+
+验收：`go test -race ./...`、两种 tag 的 vet 与 lint、泄漏扫描全部通过；代码中不再出现 mirror、generation 相关符号（`grep -rn 'Mirror\|generation' internal cmd` 无结果）。
+
+## MySQL 全量迁移（开工前先写细化计划）
+
+按 读取 → 转换 → 写入 拆成三份细化计划：读取：从 MySQL 全量读出与按条件查询 New API 数据（纠偏后重写）、转换：规则引擎与 New API 映射规则、写入：全量写入 ACG。
+
+目标：源库静止时，全量结果通过固定样例对照与候选渠道等价校验；中断后重跑无重复资源。
 
 | 任务 | 内容 | 关键测试 | design |
 | --- | --- | --- | --- |
-| 2.1 契约探测与归一 | `source/contract`：版本与表结构指纹、缺列阻止、未知列告警、tinyint/JSON/时间归一 | 保留字列名、缺列、未知列、归一失败即报错 | 3.1–3.4 |
-| 2.2 MySQL 快照世代 | `source/mysql/snapshot.go`：一致性读事务、主键游标分页、`ReadSecrets` | 分页不漏行；快照期间并发修改不可见；连接中断后世代作废，不拼接新快照 | 3.3 |
-| 2.3 镜像存储 | `mirror`：按世代写入 `mirror_rows`，世代状态流转，激活 | 未激活世代不可读；激活是原子的 | 3.3、9.6 |
-| 2.4 DSL 与 CEL 编译 | `mapping/dsl`、`mapping/cel`：类型化声明、`${}` 语法糖、成本限制、规则 DAG | 错字段编译期报错并给出路径；循环引用报错 | 4.1–4.2 |
-| 2.5 求值器 | `mapping/eval`：join、let、when、for\_each、group\_by、ref\_select；`Full`、`Compute` 返回 DesiredPatch | 缺失 / null / 空串三种情况；when 变假时出现在 Removed | 4.1–4.4 |
-| 2.6 New API 映射配置 | `configs/mappings/newapi-to-acg/*`、`configs/lookups/*`、golden | 先 Group/User/Provider，再路由，最后授权；覆盖 M0 样本全部情况 | 5.3–5.6 |
-| 2.7 命名登记 | `mapping/naming`：整世代一次性分配、重名全部追加 ID、冻结、别名表 | 输入顺序不影响命名；与非迁移资源冲突进入失败队列 | 5.3 |
-| 2.8 差分与计划 | `engine/diff.go`、`engine/planner.go` | 三方对比全部分支（含“双方相同新值”）；依赖顺序；apikey 先撤后授、新建先禁用 | 8.3、8.4 |
-| 2.9 收敛器与恢复 | `engine/converger.go`、`engine/recovery.go`、`secrets/resolver.go` | 意图先于写入提交；结果未知时先 Observe；密钥指纹不符时延后；密码只初始化一次 | 6.1、6.2、11.3 |
-| 2.10 静态全量 | `pipeline/bootstrap.go`：快照 → 激活 → 全部入队 → 收敛（本里程碑不追平 binlog，只用静态源） | 首次全量结果等于 golden；在收敛中途强杀后续跑，无重复资源 | 8.1、11.3 |
-| 2.11 dry\_run 报告 | `report`：路由名、改名清单、dropped、保真度、冲突 | 报告确定且脱敏；dry\_run 切换 live 时重新观测并重新计划 | 8.1 |
+| 2.1 字段核对与类型转换 | `source/contract`：缺列阻止、未知列告警、tinyint/JSON/时间转换 | 保留字列名、缺列、未知列、转换失败即报错且不回显原值 | 3.1–3.4 |
+| 2.2 MySQL 全量读取 | `source/mysql`：一个只读一致性读事务读完全部表、主键分页、读取前记录 G0 | 分页不漏行；读取期间并发修改不可见；连接中断即报错 | 3.3、9.4 |
+| 2.3 按条件回源查询 | `source/mysql`：`Query` 在一个一致性读事务里按条件查询（按 ID、按分组、按用户、按模型），密钥以 `secrets.Value` 返回 | 条件生成安全 SQL；结果与全量读取的类型转换一致 | 9.6、11.2 |
+| 2.4 规则文件解析与表达式 | `mapping/dsl`、`mapping/cel`：字段类型声明、`${}` 写法、成本限制、规则依赖顺序 | 引用不存在的字段在加载时报错并给出路径；循环引用报错 | 4.1–4.2 |
+| 2.5 规则执行 | `mapping/eval`：join、let、when、for\_each、group\_by、ref\_select；`Full` 与 `Compute` | 缺失 / null / 空串三种情况；when 变假时出现在 Removed | 4.1–4.4 |
+| 2.6 New API 映射规则 | `configs/mappings/newapi-to-acg/*`、`configs/lookups/*`、固定样例对照 | 先分组/用户/提供商，再路由，最后授权；覆盖表结构核对阶段准备的样本 | 5.3–5.6 |
+| 2.7 资源命名 | `mapping/naming`：首次全量一次性分配、重名全部追加 ID、名字冻结、别名表 | 输入顺序不影响命名；与 ACG 中非迁移资源冲突进入失败队列 | 5.3 |
+| 2.8 比较与写入顺序 | `engine/diff.go`、`engine/planner.go` | 三方比较全部分支（含“双方改成相同新值”）；依赖顺序；apikey 先撤后授、新建先禁用 | 8.3、8.4 |
+| 2.9 写入器与崩溃恢复 | `engine/writer.go`、`engine/recovery.go` | 写入登记先于调用 ACG 提交；结果未知时先查 ACG 再决定；回源重算后无变化不写；密码只初始化一次 | 6.1、11.3 |
+| 2.10 全量流程 | `pipeline/full.go`：记录 G0 → 一致性读 → 转换 → 全部资源入队 → 写入器写完 | 首次全量结果等于固定样例；写入中途强杀后重跑，无重复资源 | 8.1、9.4 |
+| 2.11 预览报告 | `report`：路由名、改名清单、不迁移字段、保真度、冲突 | 报告确定且脱敏；dry\_run 切换为真实写入时重新读取 ACG 现状 | 8.1 |
 
-M2 验收只覆盖静态源；并发写入下的快照正确性在 M3 完成后才成立。第一份可演示交付物：配置校验 + 五类资源 golden + MySQL 静态全量 + 脱敏报告。
+本阶段验收只覆盖读取期间源库不变的情况；源库有并发写入时的正确性由 binlog 增量同步阶段保证。第一份可演示交付物：配置校验 + 五类资源样例对照 + MySQL 全量 + 脱敏预览报告。
 
-## M3：binlog 增量（开工前先写细化计划）
+## binlog 增量同步（开工前先写细化计划）
 
-目标：并发写入下追平正确；增量结果等于重新全量；逐点强杀后不丢不重。
+目标：全量读取期间及之后的源库变更都能同步到 ACG；增量后 ACG 内容等于对源库当前数据全量转换的结果；逐点强杀后不丢不重。
 
 | 任务 | 内容 | 关键测试 | design |
 | --- | --- | --- | --- |
 | 3.1 GTID 集合 | `source/position.go`：解析、包含、合并、差集 | 多 UUID、区间合并、包含判断 | 9.5 |
 | 3.2 事务组装 | `source/mysql/binlog.go`：XID 与 QueryEvent 边界、跨表事务、重连续传 | 回滚事务不输出；只输出完整事务；重连后不重复不遗漏 | 9.3、9.5 |
-| 3.3 列级过滤 | `source/mysql/filter.go`：基于归一后契约值比较 | 只改额度的事务只推进位点 | 9.7 |
-| 3.4 DDL 处理 | `source/mysql/ddl.go`：TiDB parser，解析失败按保守策略 | 加列后重新探测通过并继续；缺列进入 PAUSED | 9.7 |
-| 3.5 追平 | `pipeline/bootstrap.go`：G0 → 快照 → G1 → 回放到覆盖 G1 → 激活 | 快照期间插入、删除、重复修改同一行，追平后镜像等于源端屏障状态 | 9.4 |
-| 3.6 依赖与影响 | `mapping/deps`：中间集合、反向索引、前后并集 | 空分组首个渠道、最后一个成员移除、用户启停扇出到令牌 | 9.6、9.7 |
-| 3.7 消费者 | `pipeline/stream.go`：单源事务单 PG 事务、背压 | 每一步增量与同视图全量比较一致；超过 max\_pending 时暂停 | 9.5、11.3 |
-| 3.8 失败隔离 | `engine/retry.go`：失败队列去重、阻塞传播、按最新镜像重试 | 删除或配置变化后，重试不重建过时资源 | 8.2 |
-| 3.9 e2e 增量与恢复 | `test/e2e/{incremental,recovery}_test.go`，compose 增加 MySQL（GTID）与 New API | 随机事件序列属性测试；按 design 11.4 的每个提交点逐点强杀 | 11.4 |
+| 3.3 列过滤 | `source/mysql/filter.go`：只比较字段清单中的列 | 只改额度的事务只推进位置 | 9.7 |
+| 3.4 DDL 处理 | `source/mysql/ddl.go`：TiDB parser，解析失败按保守策略 | 加列后重新核对通过并继续；缺列进入 PAUSED | 9.7 |
+| 3.5 受影响资源 | `mapping/affected`：由变更前后的值得到资源标识与“分组/用户下全部令牌待重算”标记 | 渠道换组、模型增删、空分组首个渠道、最后一个成员移除、用户启停 | 9.6 |
+| 3.6 消费者 | `pipeline/stream.go`：每个源事务一个 PG 事务（入队 + 位置）、背压 | 位置与入队原子；超过 max\_pending 时暂停 | 9.5、11.3 |
+| 3.7 全量与增量衔接 | 从 G0 订阅 | 全量读取期间插入、删除、重复修改同一行，增量处理后 ACG 与源库一致 | 9.4 |
+| 3.8 失败隔离 | `engine/retry.go`：失败队列去重、阻塞传播、重试时回源重算 | 删除或配置变化后，重试不重建过时资源 | 8.2 |
+| 3.9 端到端增量与恢复 | `test/e2e/{incremental,recovery}_test.go`，compose 增加 MySQL（GTID）与 New API | 随机变更序列属性测试；按 design 11.4 的每个提交点逐点强杀 | 11.4 |
 
-第一份可运行的同步版本必须通过 M3 的恢复门禁。
+第一份可运行的同步版本必须通过本阶段的崩溃恢复测试。
 
-## M4：对账、其他读取器与运维（开工前先写细化计划）
+## 定期核对、其他数据源与运维（开工前先写细化计划）
 
 | 任务 | 内容 | 关键测试 | design |
 | --- | --- | --- | --- |
-| 4.1 影子世代对账 | `engine/reconcile.go`：后台构建、屏障、比较、原子切换 | 对账与 CDC 并发不回退；任一步失败保留旧世代；在途资源不误判 drift | 8.3 |
+| 4.1 定期核对 | `engine/reconcile.go`：全量读取 → 与上次写入、ACG 现状三方比较 → 差异资源入队 | 与增量同时运行不回退；待写入或在途资源不误判 drift | 8.3 |
 | 4.2 配置热加载 | `config/reload.go` | 坏配置保留旧版本；切换后受影响资源入队，last\_applied 带新 config\_hash | 8.3 |
-| 4.3 其他全量读取器 | `source/{postgres,sqlite,api}`、`pipeline/poll.go` | 与 MySQL 共用归一契约测试；API 连续多轮缺失才按删除处理 | 9.9 |
+| 4.3 其他全量读取器 | `source/{postgres,sqlite,api}`、`pipeline/poll.go` | 与 MySQL 共用字段核对与类型转换测试；API 连续多轮缺失才按删除处理 | 9.9 |
 | 4.4 管理接口与审计 | `service/admin.go`、`cmd/migrator/admin.go` | 鉴权；所有变更操作写审计；pause / resume / stop | 8.8、10.3 |
 | 4.5 resync 与回滚 | `engine/rollback.go` | resync 保留归属与命名；回滚前必须 STOPPED；无法恢复的密钥写入报告 | 8.8 |
 | 4.6 指标与探针 | `service/{metrics,health}.go` | 指标覆盖 design 8.5 所列项；GTID 差以事务数表示 | 8.5 |
 | 4.7 部署 | `deploy/k8s/*`、`docs/runbook.md` | 单副本 Recreate；首次能力检查失败停在 PRECHECK 并给出原因 | 8.5 |
 | 4.8 切换检查 | `admin cutover-check` | 按 design 8.9 第 5 步逐项检查，任一不满足即拒绝 | 8.9 |
-| 4.9 规模测试 | `test/e2e/scale_test.go` | 正常与峰值规模下记录内存、事务时长、追平与收敛速率，回填 8.6 阈值 | 11.4 |
+| 4.9 规模测试 | `test/e2e/scale_test.go` | 正常与峰值规模下记录内存、事务时长、回源查询负载与写入速率，回填 8.6 阈值 | 11.4 |
 
-## M5：真实 ACG 适配器（ACG 定稿后，先写细化计划）
+## 对接真实 ACG（ACG 接口定稿后，先写细化计划）
 
 | 任务 | 内容 | 关键测试 |
 | --- | --- | --- |
 | 5.1 能力探测 | `target/acg/capabilities.go`：对照 `docs/compatibility/acg.md` | 缺少安全幂等、授权隔离或密码保护时，预检阻止对应资源 |
-| 5.2 观测与写入 | `target/acg/{client,observe,apply}.go` | 通过 `test/contract` 共用契约测试；密钥写入回执；部分成功 |
+| 5.2 观测与写入 | `target/acg/{client,observe,apply}.go` | 通过 `test/contract` 共用接口测试；密钥写入回执；部分成功 |
 | 5.3 语义验证 | `test/e2e/acg_test.go` | 原模型名、原 key、前缀、多密钥、IP 限制、过期、强制改密、先过滤授权再选路 |
 | 5.4 切换演练 | 在测试环境完成全量、增量、对账、cutover-check 和一次完整切换 | 按 design 5.7 两层等价校验 |
 
@@ -347,15 +363,15 @@ M2 验收只覆盖静态源；并发写入下的快照正确性在 M3 完成后�
 
 | 门禁 | 必须证明的行为 | 验证方式 |
 | --- | --- | --- |
-| M0 契约 | 字段全覆盖；授权语义有实测结论 | 兼容性文档评审 |
-| M1 骨架 | 重启恢复状态；任务互斥；产物脱敏 | PG 集成测试、目标契约测试、泄漏扫描 |
-| M2 全量 | 五类资源和授权正确；命名确定；中断续跑幂等 | 固定源 golden、独立候选集合、全量端到端 |
-| M3 增量 | 追平无遗漏；增量逻辑期望等于全量；故障恢复收敛 | 随机事件序列、逐提交点故障注入 |
-| M4 运维 | 对账不覆盖新状态；坏配置不生效；各读取器一致；切换检查可靠 | 并发对账、热加载、跨驱动样例、部署与切换演练 |
-| M5 ACG | 真实候选渠道与授权等价；客户端切换符合报告 | ACG 契约测试、业务流量演练 |
+| 表结构与能力核对 | 字段全覆盖；授权语义有实测结论 | 兼容性文档评审 |
+| 服务骨架 | 重启恢复状态；任务互斥；产物脱敏 | PG 集成测试、写入目标共用接口测试、泄漏扫描 |
+| MySQL 全量迁移 | 五类资源和授权正确；命名确定；中断续跑幂等 | 固定样例对照、独立候选集合、全量端到端 |
+| binlog 增量同步 | 增量后 ACG 内容等于全量转换结果；故障恢复后一致 | 随机事件序列、逐提交点故障注入 |
+| 定期核对与运维 | 对账不覆盖新状态；坏配置不生效；各读取器一致；切换检查可靠 | 并发对账、热加载、跨驱动样例、部署与切换演练 |
+| 对接真实 ACG | 真实候选渠道与授权等价；客户端切换符合报告 | ACG 共用接口测试、业务流量演练 |
 
 选路验收分两层：先比较启用且被授权的候选成员集合，再比较最高优先级集合与权重；每个 apikey 单独比较，不能只比较“分组 × 模型”，也不能用“多次随机请求大致正常”代替集合等价证明。
 
-**依赖顺序：** `Task 0 → M0（可与 M1 并行）→ M1 → M2 → M3 → M4 → M5`。ACG 能力对齐从 M0 开始持续进行，M1～M4 的实现不以 ACG 数据结构定稿为前提。
+**依赖顺序：** 工程初始化 → 表结构与能力核对（可与服务骨架并行）→ 服务骨架 → MySQL 全量迁移 → binlog 增量同步 → 定期核对与运维 → 对接真实 ACG。与 ACG 团队的能力确认从第一阶段开始持续进行，对接真实 ACG 之前的各阶段都不需要等 ACG 接口定稿。
 
 **最终交付：** Go 服务、五类资源 schema、New API 配置包、四种读取方式、模拟 / 文件 / ACG 目标、自动化测试、K8s 清单、对账与改名报告、兼容性矩阵和切换 runbook。

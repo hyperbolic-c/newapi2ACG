@@ -1,156 +1,97 @@
-# New API → ACG
+# New API → ACG 迁移服务
 
-按 [design v3.2](design-v3.2.md) 开发的单向迁移与持续同步服务。
-实施任务见 [实施计划](docs/plans/2026-11-04-newapi-to-acg-implementation.md)。
+把 New API 中的渠道、分组、用户和令牌迁移到公司内部算力网关 ACG，并在切换完成前保持两边一致。
 
-## 当前实现
+设计见 [design-v3.3.md](design-v3.3.md)，开发计划见 [docs/plans/](docs/plans/)，进度见 [docs/implementation-status.md](docs/implementation-status.md)。
 
-- 五类逻辑资源、来源标识、规范化哈希和 JSON Schema。
-- 严格 YAML 配置加载、引用检查、配置哈希，支持 ConfigMap 投射符号链接。
-- SecretValue 脱敏、HMAC 指纹、报告短指纹。
-- 服务状态机和可取消 runner；内存目标的授权、路由、故障注入和幂等回执。
-- 文件目标原子发布脱敏报告；CLI `validate` 校验配置结构及引用。
-- CLI `run`：迁移状态库、登记任务、获取租约后驱动状态机；预检尚未实现，任务停留在 PRECHECK 并记录原因。
-- 上游 `new-api/` 固定为 `v1.0.0-rc.21`；源契约和字段清单见 [兼容性登记](docs/compatibility/new-api.md)。
+## 它做什么
 
-PG 表迁移、租约、核心短事务和任务状态仓储已实现，尚未连接真实 PG 验证；源读取器、预检、映射与真实 ACG 适配器尚未实现。文件报告不能用于恢复完整密钥或跨进程恢复模拟状态。详见 [开发进度](docs/implementation-status.md)。
+整个服务就是三步：
 
-## 本地验证
+1. **读取**：从 New API 的数据库读出渠道、用户、令牌。
+2. **转换**：按 `configs/mappings/` 中的规则，把它们转换成 ACG 的提供商、路由、用户、API key。
+3. **写入**：调用 ACG 管理接口写进去。已经写过且没变化的不再写。
 
-Go 语言版本为 1.26。YAML 依赖已锁定在 `go.mod`/`go.sum`。
+服务不保存 New API 数据的副本，只保存同步所需的少量状态（binlog 位置、New API 记录与 ACG 资源的对应关系、上次写入的内容、写入记录）。
+
+同步分三种方式，自动衔接：
+
+| 方式 | 何时 | 做什么 |
+| --- | --- | --- |
+| 全量 | 首次启动 | 读出全部数据，转换后全部写入 ACG |
+| 增量 | 全量之后持续运行 | 以 MySQL 从库身份订阅 binlog。某一行变了，找出受影响的 ACG 资源，回源 MySQL 查出它们当前的数据，转换后写入 |
+| 定期核对 | 每隔一段时间（默认 6 小时） | 重新全量读取，和 ACG 实际状态比较，补上增量漏掉的或被人手改过的部分 |
+
+## 几个用词
+
+| 用词 | 含义 |
+| --- | --- |
+| 待写入队列 | 需要重新写入 ACG 的资源列表。全量时全部资源入队，增量时只有受影响的入队。写入时总是回源查当前数据重新计算，所以同一资源重复入队没有副作用 |
+| 写入记录 | 每次写 ACG 前先记下“要写什么”，写完记下结果。进程中途崩溃后，按记录判断哪些已经写成功，避免重复写 |
+| 任务锁 | 保证同一个迁移任务同一时刻只有一个进程在执行 |
+| 密钥哈希 | 服务不保存渠道密钥和令牌原文，只保存它们的加盐哈希值，用来判断密钥有没有变化；写入 ACG 时从源库读取原文，只在内存中使用 |
+| 模拟 ACG | 一个在内存里模仿 ACG 行为的测试替身，ACG 接口定稿前用它测试整个流程 |
+| 预览输出 | 不写 ACG，只把“将要写入的内容”输出到文件，供人工检查（`dry_run: true`） |
+
+## 当前进度
+
+已完成（详细见 [进度](docs/implementation-status.md)）：
+
+- **配置**：读取并校验 `configs/` 下的 YAML（源库连接、要读的表和字段、迁移策略、目标配置）。
+- **ACG 资源定义**：提供商、聚合路由、分组、用户、API key 五类资源的结构和校验规则。
+- **密钥保护**：密钥在日志、报告、JSON 输出中一律显示为 `***`，存储时只存哈希。
+- **服务骨架**：`migrator run` 能启动、建好自己的 PG 表、拿到任务锁、记录任务状态，重启后从上次状态继续。其中按旧设计保存源数据副本的部分将被删除（见[开发计划](docs/plans/2026-11-04-newapi-to-acg-implementation.md)“纠偏”一节）。
+- **测试用的写入目标**：模拟 ACG、预览输出。
+
+尚未完成：从 MySQL 读取、转换规则引擎、写入流程、增量同步、定期核对、真实 ACG 对接。
+
+目前所有涉及真实数据库的测试都只编译、未运行（本阶段不启动数据库）。
+
+## 使用
 
 ```sh
-make test vet test-leak
-go test -race ./...
+# 校验配置
 go run ./cmd/migrator validate --config-dir configs
-```
 
-独立 JSON Schema 结构校验需要 `test/schema/requirements.txt` 中的 Python 依赖：
-
-```sh
-make test-schema PYTHON=/path/to/python
-```
-
-此门禁覆盖共享正反例与配置样例；URL、时间、跨资源引用等语义由 Go 校验，不声称 Python format 插件已验证这些语义。
-
-```sh
-make lint       # 需要 golangci-lint v2
-make leak-scan  # 运行产物测试和 gitleaks 扫描
-```
-
-工具缺失时门禁失败，不静默跳过。当前无数据库或端到端用例，不能将带 tag 运行单元测试解释为集成验证。按用户要求，不下载或启动数据库容器。
-
-## 依赖
-
-已锁定 `go.yaml.in/yaml/v3 v3.0.4`，通过本机模块与校验和缓存离线验证；独立 Schema 测试使用 jsonschema 4.26.0。CEL、go-mysql、TiDB parser、pgx 等后续依赖尚未接入。
-
-## Git 与远程
-
-约定模块路径：`github.com/hyperbolic-c/newapi2ACG`。
-用户指定远程：`git@github.com:hyperbolic-c/newapi2ACG.git`。
-
-当前会话无法创建工作区 `.git`，也无法通过 SSH 访问 GitHub；因此尚未初始化本地仓库、配置 origin、创建开发分支、提交或推送。以下是恢复权限后的操作说明，并非已执行成功的操作：
-
-```sh
-git ls-remote git@github.com:hyperbolic-c/newapi2ACG.git
-```
-
-先确认远程是否已有历史。有历史时先检出并合并当前本地文件；远程为空时再初始化 `feat/m1-foundation` 分支、添加 origin 并按计划提交。不要覆盖远程历史或直接强推。
-
-## 密钥约定
-
-`secrets.Value` 只负责防止常规输出泄漏，不是内存加密。仅源转换和目标请求构造应显式调用 `Reveal()`；原值不能存入镜像、资源快照、日志或状态库。
-
-指纹盐由环境变量提供，必须跨重启保持一致。完整指纹用于比较，前八位仅用于报告。序列化后的脱敏占位符不能反序列化成可用密钥，恢复写入必须回源读取并校验指纹。
-
-## PG 状态库迁移（Task 1.5）
-
-`internal/state/pg.Migrate(ctx, db)` 使用 `database/sql` 连接和内嵌 SQL；
-不依赖外部迁移 CLI。当前 `001_init.sql` 创建 design 8.7 的 15 张业务表，
-以及独立的 `migrator.schema_migrations` 元数据表。
-后续 `002_resource_intents.sql` 增加每资源当前意图登记表。
-迁移在单一事务中获取固定 advisory transaction lock，串行执行 DDL 和版本登记；
-重复运行校验 SHA-256，不重新建表。已应用的 SQL 不应原地修改。
-失败回滚；提交结果未知时重新执行并检查数据库记录。应用账号需要创建 schema、表和序列的权限。
-
-驱动暂用已从本机缓存校验并锁定的 `github.com/lib/pq v1.12.3`，集成测试通过该驱动执行；
-迁移 API 不绑定驱动，后续接入 pgx 不改变 SQL 迁移协议。`migrator run` 启动时执行迁移。
-
-```sh
-go test ./internal/state/pg/...
-# 只编译集成测试，不连接数据库：
-go test -tags=integration ./internal/state/pg/... -run '^$'
-# 有可用的独立测试 PG 后，提供 URL 格式 DSN：
-MIGRATOR_TEST_PG_DSN="$YOUR_TEST_PG_DSN" go test -tags=integration ./internal/state/pg/...
-```
-
-集成测试要求测试账号具有 CREATEDB 权限；每个用例新建临时数据库，结束后删除，
-不会迁移或删除 DSN 指向的数据库。未提供 DSN 时显式失败。
-`test/e2e/compose.yaml` 是可选测试配置，本轮未下载镜像或启动容器。
-离线测试验证执行流程、回滚和校验和检查，不证明 PostgreSQL SQL 语法和约束已在真实服务器验证。
-JSONB 列不能自动判定秘密数据，写入层仍须执行资源脱敏和密钥指纹化。
-
-## 运行服务（Task 1.11）
-
-```sh
-export MIGRATOR_STATE_DSN='postgres://...'   # 由目标配置的 state_dsn_env 指定变量名
+# 运行服务。服务自己的 PG 库地址放在环境变量里，变量名由 configs/targets/*.yaml 的 state_dsn_env 指定
+export MIGRATOR_STATE_DSN='postgres://...'
 go run ./cmd/migrator run --config-dir configs [--job NAME]
 ```
 
-启动顺序：加载并校验配置 → 连接状态库并执行迁移 → 登记任务（已存在则不改动状态与 config_hash）
-→ 获取任务租约（被占用时按 `--lease-retry` 等待）→ 驱动状态机。
-预检尚未实现，任务停留在 PRECHECK，原因写入 `migrator.jobs.reason`，按 `--work-retry` 重试。
-PAUSED/STOPPED 任务持有租约空闲等待，避免 Deployment 反复重启。SIGINT/SIGTERM 正常退出（0）并释放租约；
-租约丢失或持久化状态没有对应处理器时以 1 退出。日志和错误只出现环境变量名，不出现 DSN。
+`run` 启动后依次：校验配置 → 连接服务自己的 PG 库并建表 → 登记任务 → 获取任务锁（被其他进程占用时每 5 秒重试）→ 按任务状态执行。
 
-## PG 任务锁（Task 1.6）
+目前“预检”这一步还没实现，所以任务会停在 `PRECHECK` 状态，原因写在 `migrator.jobs.reason` 里，每 30 秒重试一次。收到 Ctrl-C / SIGTERM 时正常退出并释放任务锁。日志里只会出现环境变量名，不会出现数据库地址或密码。
 
-`pg.AcquireLease(ctx, dsn, jobID, options)` 为任务创建专用 PG 会话并非阻塞获取
-session advisory lock；同一数据库、同一任务只能有一个持有者，冲突返回 `ErrLeaseHeld`。
-锁键由固定命名空间和 jobID 的 SHA-256 前 64 位生成；极低概率哈希冲突只会导致额外互斥。
-租约连接独立于状态库连接池，禁止事务模式连接池代理，需直连 PG 或使用 session 模式。
+## 开发与测试
 
-`Lease.Context()` 可直接交给服务 runner。健康查询失败或超时会取消该上下文，
-不会重连后继续工作；父上下文取消也结束租约。`Close()` 可重复、并发调用，
-先取消工作上下文，再等待专用连接销毁以释放锁。任务执行器仍必须响应取消。
-健康检测延迟上界为检查间隔加查询超时（另加调度延迟）；默认各为一秒。
-租约不提供目标端 fencing，已经发往 ACG 的旧请求仍需依赖目标条件写入及后续收敛。
+Go 1.26。离线环境下先设置模块缓存（见 [进度文档的“开发环境”](docs/implementation-status.md#开发环境)）。
 
-离线测试覆盖健康失败/超时、父上下文取消、并发关闭、竞争失败后的连接清理。
-真实 PG 用例已编写但未执行：同任务竞争、不同任务并行、关闭后重获锁、
-`pg_terminate_backend` 后取消上下文并重新获取锁。
+```sh
+go test -race ./...        # 单元测试
+make lint                  # golangci-lint
+make leak-scan             # 检查仓库和测试产物中是否有密钥
+uv run --no-project --with-requirements test/schema/requirements.txt python test/schema/check.py   # JSON Schema 校验
+```
 
-健康检查采用独立超时监控；即使驱动探测没有响应 context，租约也会取消。
-专用 dialer 保留会话 socket，关闭租约先关闭底层 socket，再清理 SQL 会话，
-避免驱动查询阻塞时无法销毁连接。此路径有不响应取消的探测和阻塞 socket 回归测试。
+需要真实数据库的测试带 `integration` 标记，有测试库时这样运行：
 
-## PG 短事务（Task 1.7）
+```sh
+MIGRATOR_TEST_PG_DSN='postgres://...' go test -tags=integration ./...
+```
 
-`pg.Store.Begin(ctx, jobID, targetID)` 返回绑定任务和目标的 repeatable-read 事务。
-当前实现镜像读写、GTID 集合读写、版本化队列、操作意图及结果回执、last_applied 读取。
-GTID 集合的解析与包含关系由后续源消费者保证；Advance 只原子保存传入的已应用集合。
-任一方法失败后 Commit 会回滚，调用方需在失败或序列化冲突后重建整个短事务。
-目标 API 调用不能放在这些事务内；状态库账号、任务租约由上层负责配置和持有。
+测试会自己创建临时数据库并在结束后删除，不会改动 DSN 指向的数据库；测试账号需要建库权限。
 
-队列读取返回入队版本；再次入队获取新版本，Dequeue 仅删除相同版本。
-意图按 OpID 绑定目标、资源、操作、内容哈希和幂等内容键；重放不能重置已完成状态。
-结果携带 `state.AppliedResult`（变更、结果、配置哈希），事务先锁定并核验原意图，
-成功后同步更新 operations、id_map、last_applied 及 API key 授权集合。
-成功回执不可降级；同一成功操作重放不会再次覆盖资源状态。
-Retryable 映射为持久化 unknown，保留队列，由后续收敛器重新观察目标。
-更新前的 `Prev` 在意图事务中保存脱敏快照，避免目标调用之后才记录旧状态。
-资源结果不自动出队，调用方必须在同一结果事务中提交携带原版本号的 Dequeue。
+## 目录
 
-镜像写入必须来自已执行列白名单和秘密字段剥离的源适配器；JSONB 不能识别任意字符串是否为原始密钥。
-密钥指纹必须是完整 64 位十六进制 HMAC；原始错误文本不写入状态表。
-用户初始化密码回执、命名分配、依赖索引和失败队列留给对应后续实现，未提供空实现。
-当前离线测试与真实 PG 用例源码均已提供；真实 PG 事务可见性、约束和恢复语义尚未实测。
-
-结果回执还必须匹配 `resource_intents` 中当前操作；旧操作晚到不能覆盖较新的资源状态。
-旧意图重放不改变当前指针。迁移 002 不推断已有未决操作的先后顺序；它们需观察目标后
-重新计算并登记新意图，不能直接补记旧回执。JSON 镜像数字读取为 json.Number，映射层按契约解析。
-目前携带 User.Initialization 的操作明确报错，待初始化完成标记接入后开放。
-
-新意图注册时，旧 pending/unknown 意图在同一事务中变为 failed，error_code 为 superseded；
-它表示被新意图取代，不进入资源失败队列。当前资源同时重新入队，以便重新观察并收敛。
-迟到旧回执不更新当前资源状态，也不会将旧操作重新打开为 pending/unknown。
+| 目录 | 内容 |
+| --- | --- |
+| `cmd/migrator` | 命令行入口：`validate`、`run` |
+| `internal/config` | 配置读取与校验 |
+| `internal/model` | ACG 五类资源的定义 |
+| `internal/secrets` | 密钥保护与哈希 |
+| `internal/service` | 任务状态流转（预检 → 全量 → 增量 …） |
+| `internal/state/pg` | 服务自己的 PG 库：建表、任务锁、binlog 位置、待写入队列、写入记录 |
+| `internal/target` | 写入目标：`memory`（模拟 ACG）、`file`（预览输出） |
+| `configs/` | 配置样例 |
+| `docs/compatibility` | New API 表结构核对结果 |
+| `new-api/` | New API 上游源码，只读参考，不入库 |
