@@ -6,7 +6,7 @@
 
 | 任务 | 状态 | 实现与边界 |
 | --- | --- | --- |
-| Task 0 工程初始化 | 部分完成 | 工程、工具配置、YAML 依赖锁定；Git 和完整工具门禁未完成 |
+| Task 0 工程初始化 | 已完成 | 工程、工具配置、依赖锁定；Git 仓库已推送 `origin/main`；lint、gitleaks 门禁通过 |
 | M0 源契约 | 源码核验完成，运行核验待办 | 本地 tag v1.0.0-rc.21，76 个持久化字段分类，34 个采集、42 个 dropped；无数据库/HTTP 实测 |
 | 1.1 资源标识 | 已实现 | kind、实例前缀、opaque local、文本/JSON 往返 |
 | 1.2 资源与 Schema | 已实现 | 五类资源、严格解码、规范化哈希；Go 与独立 JSON Schema 共享正反例 |
@@ -19,7 +19,7 @@
 | 1.9 内存目标 | 已实现 | 五类资源、授权/路由、故障注入、回执、共享契约测试；不是实际 ACG 等价证明 |
 | 1.10 文件目标 | 已实现 | 确定性脱敏报告、临时文件原子替换、发布失败不提交模拟状态；不承诺断电持久性或从报告恢复状态 |
 | 1.11 CLI | 代码完成，真实 PG 验证待办 | validate；run 完成迁移、登记、租约等待、状态机驱动与信号退出；预检为显式未实现，任务停在 PRECHECK |
-| 1.12 泄漏门禁 | 部分完成 | 本次生成日志、JSON、报告、文件及 Observe 输出扫描；PG 全文本扫描和 gitleaks 门禁尚未完成 |
+| 1.12 泄漏门禁 | 部分完成 | 生成产物扫描与 gitleaks 仓库扫描通过；PG 全文本扫描依赖真实 PG，尚未完成 |
 | M2～M5 | 未开始 | 各里程碑开工前补齐细化计划 |
 
 ## 本批审查修复
@@ -54,8 +54,6 @@ export GOPROXY=file:///Users/liam/go/pkg/mod/cache/download
 
 ## 尚未完成的门禁
 
-- 工作区尚无 Git 仓库；此前 `.git` 写入和 GitHub SSH 被环境阻止，没有提交或推送。
-- golangci-lint、gitleaks 不在 PATH 中，完整 lint/leak-scan 未通过。
 - PG、双实例抢锁、持久恢复、源数据库与真实 ACG 集成验证均未执行，M1 总体验收未完成。
 
 PG 任务状态仓储及 CLI run 已接入（见下方 Task 1.8/1.11 批次）。M1 剩余：真实 PG 集成验证、PG 全文本泄漏扫描、golangci-lint/gitleaks 门禁、Git 初始化。
@@ -128,7 +126,15 @@ PG 任务状态仓储及 CLI run 已接入（见下方 Task 1.8/1.11 批次）�
 
 ## 下一步
 
+0. ~~初始化 Git、lint、gitleaks~~：已完成，见“仓库与工具门禁”。
 1. 有可用测试 PG 时运行：`MIGRATOR_TEST_PG_DSN=... go test -tags=integration ./internal/state/pg/... ./cmd/migrator/...`，补齐 M1 PG 验收（迁移、锁、短事务、仓储、空任务启动）。
 2. Task 1.12：泄漏扫描扩展到 PG 全部文本列（依赖第 1 步的真实 PG）。
-3. 安装 golangci-lint、gitleaks 并通过 `make lint leak-scan`；初始化 Git 并提交 M1。
 4. M1 验收后，按计划先写 M2 细化计划（`docs/plans/<日期>-m2-*.md`），再从契约探测与 MySQL 快照世代开始。
+
+## 仓库与工具门禁
+
+- Git：`main` 已推送到 `git@github.com:hyperbolic-c/newapi2ACG.git`。首批两个提交：设计与计划文档；M1 骨架实现。`new-api/` 上游参考副本保持 gitignore，不入库。
+- 工具：Homebrew 安装 gitleaks 8.30.1、golangci-lint 2.15.0。
+- gitleaks：默认规则；仅对 gitignore 的上游参考副本（`new-api/`、`references/new-api/`）设路径白名单，此前 10 条命中全部来自该目录的上游测试样例。项目自身代码与文档无命中。
+- golangci-lint（standard 规则集）：修复 26 处问题，无 nolint。尽力清理路径改为显式 `_ =` 并注明原因；测试中验证释放/回滚的调用改为检查错误；`run` 关闭租约失败时记录告警；修正一处自比较断言。errcheck 只豁免写 stderr 的 `fmt.Fprint*`。
+- 当前结果：`golangci-lint run` 与 `--build-tags=integration` 均 0 issues；`make leak-scan` no leaks；`go test -race ./...` 全部通过；Schema 门禁通过 `uv run --no-project --with-requirements test/schema/requirements.txt python test/schema/check.py` 运行并通过。
