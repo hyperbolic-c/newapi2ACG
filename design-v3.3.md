@@ -207,7 +207,7 @@ project: new-api
 access:
   type: database
   driver: mysql                      # mysql | postgres | sqlite
-  dsn_env: NEWAPI_PROD_DSN           # 同一个 DSN 用于 binlog 订阅、全量读取和回源查询，必须指向一个固定实例
+  dsn_env: NEWAPI_PROD_DSN           # go-mysql 格式 用户:密码@主机:端口/库名；同一个 DSN 用于 binlog 订阅、全量读取和回源查询，必须指向一个固定实例
   binlog:
     server_id: 4201                  # 向 DBA 申请，不能与现有从库冲突
 ```
@@ -863,7 +863,8 @@ binlog 订阅、全量读取、回源查询必须连接**同一个 MySQL 实例*
 
 ### 9.3 实现选型
 
-- 使用 go-mysql-org/go-mysql 的 replication 包订阅 binlog，自行按事务组装；不使用 canal 的位点管理与 dump。依赖版本在工程初始化时验证并锁定。
+- MySQL 访问统一使用 go-mysql-org/go-mysql（v1.16.0）：binlog 订阅用其 `replication` 包，自行按事务组装，不使用 canal 的位点管理与 dump；全量读取、回源查询和预检用其 `driver` 包（`database/sql` 驱动）。不再引入 `go-sql-driver/mysql`，避免两套驱动在连接参数、错误类型和数值表示上不一致。
+- 连接地址采用 go-mysql 格式：`用户:密码@主机:端口/库名?参数`。
 - 全量不使用 canal 自带的 dump：它调用外部 mysqldump，输出原始行并绕过字段清单。全量由第三节的读取器完成。
 - DDL 识别：使用 TiDB parser（canal 内部使用的同一解析器）解析 QueryEvent 中的语句，得到受影响的库表；解析失败时按保守策略处理，见 9.7。
 - TiDB DM 只作设计参考，不直接依赖。它把检查点存在下游库、重启后以幂等方式重放，与本节做法一致。

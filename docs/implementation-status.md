@@ -9,7 +9,7 @@
 | 部分 | 状态 | 说明 |
 | --- | --- | --- |
 | New API 表结构核对 | 源码核对完成，实库核对待办 | 对照上游 v1.0.0-rc.21 源码，三张表共 76 列：34 列迁移，42 列不迁移（额度、日志、运行数据等），逐列原因见 [new-api-schema.md](compatibility/new-api-schema.md)。实际部署是否为定制版、令牌状态等行为尚未在真实实例上验证 |
-| **读取**：从 MySQL 读全量、按条件回源查询 | 未开始 | 计划待纠偏完成后编写 |
+| **读取**：从 MySQL 读全量、按条件回源查询、源库预检 | 计划已写，未开始 | [读取：从 MySQL 全量读出与按条件查询 New API 数据](plans/2026-11-04-mysql-read.md)。读取层只依赖字段清单配置；MySQL 访问统一用 go-mysql |
 | **读取**：binlog 增量 | 未开始 | |
 | **转换**：规则引擎与 New API 映射规则 | 未开始 | |
 | **转换**：ACG 资源定义 | 已完成 | 提供商、聚合路由、分组、用户、API key 五类资源的结构、校验、JSON Schema；资源内容哈希用于判断“有没有变” |
@@ -61,7 +61,7 @@ MIGRATOR_TEST_PG_DSN='postgres://...' go test -tags=integration ./internal/state
 
 ## 下一步
 
-1. 编写并实现“读取：从 MySQL 全量读出与按条件查询 New API 数据”。
+1. 按[读取计划](plans/2026-11-04-mysql-read.md)实现（第 5 个任务需联网下载 go-mysql 一次）。
 2. 编写“转换：规则引擎与 New API 映射规则”的计划。
 3. 有测试库时运行全部 `integration` 测试。
 
