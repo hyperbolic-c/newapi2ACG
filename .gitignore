@@ -1,0 +1,10 @@
+.DS_Store
+bin/
+*.env
+.env*
+test/output/
+*.local.yaml
+.worktrees/
+.cache/
+references/new-api/
+new-api/

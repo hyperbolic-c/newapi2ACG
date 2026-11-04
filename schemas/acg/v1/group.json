@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_version": {
+      "const": "acg/v1"
+    },
+    "kind": {
+      "const": "Group"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_identity": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/Group/[^\\x00-\\x1f\\x7f]+$"
+        },
+        "migration_job": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "source_identity",
+        "migration_job"
+      ]
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  "required": [
+    "api_version",
+    "kind",
+    "metadata",
+    "group"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "acg/v1 Group",
+  "$comment": "Structural contract. Go validation additionally enforces reference instance isolation, CIDRs, and consistent duplicate route members."
+}

@@ -1,0 +1,9 @@
+title = "newapi2ACG secret scanning"
+[extend]
+useDefault = true
+
+# Upstream New API checkouts are read-only references, gitignored and never
+# committed; their test fixtures and sample keys are not ours to rotate.
+[[allowlists]]
+description = "gitignored upstream reference checkouts"
+paths = ['''^new-api/''', '''^references/new-api/''']

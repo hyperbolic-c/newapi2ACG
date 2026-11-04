@@ -1,0 +1,112 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_version": {
+      "const": "acg/v1"
+    },
+    "kind": {
+      "const": "Provider"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_identity": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/Provider/[^\\x00-\\x1f\\x7f]+$"
+        },
+        "migration_job": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "source_identity",
+        "migration_job"
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^/@#]+(?:/[^#]*)?$"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "api_keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "fingerprint"
+            ]
+          },
+          "minItems": 1
+        },
+        "model_mapping": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "endpoint",
+        "enabled",
+        "api_keys",
+        "model_mapping"
+      ]
+    }
+  },
+  "required": [
+    "api_version",
+    "kind",
+    "metadata",
+    "provider"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "acg/v1 Provider",
+  "$comment": "Structural contract. Go validation additionally enforces reference instance isolation, CIDRs, and consistent duplicate route members."
+}

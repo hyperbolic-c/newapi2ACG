@@ -1,0 +1,5 @@
+job:
+  source: example
+  mapping: newapi-to-acg
+  target: memory-test
+  dry_run: true

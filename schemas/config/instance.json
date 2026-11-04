@@ -1,0 +1,107 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "instance": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "database",
+            "api"
+          ]
+        },
+        "driver": {
+          "enum": [
+            "mysql",
+            "postgres",
+            "sqlite"
+          ]
+        },
+        "dsn_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "credential_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "database"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "driver",
+              "dsn_env"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "base_url"
+                  ]
+                },
+                {
+                  "required": [
+                    "credential_env"
+                  ]
+                }
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "base_url",
+              "credential_env"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "driver"
+                  ]
+                },
+                {
+                  "required": [
+                    "dsn_env"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "instance",
+    "project",
+    "access"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Migrator instance",
+  "$comment": "Go semantic validation additionally checks durations, source field coverage and filename identity. Independent schema validation is a separate gate."
+}

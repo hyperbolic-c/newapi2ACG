@@ -1,0 +1,220 @@
+# Draft source contract; not production-validated.
+# Source: QuantumNous/new-api v1.0.0-rc.21 @ bde9b2f44887d34ec54799ae191d50f97914359e
+# Field rationale: docs/compatibility/new-api-schema.md
+version: 2
+project: new-api
+compat:
+  supported: =1.0.0-rc.21
+  probe:
+    database:
+      require_columns:
+        channels:
+        - id
+        - type
+        - key
+        - status
+        - name
+        - weight
+        - base_url
+        - models
+        - group
+        - model_mapping
+        - priority
+        - channel_info
+        users:
+        - id
+        - username
+        - display_name
+        - role
+        - status
+        - email
+        - group
+        - deleted_at
+        tokens:
+        - id
+        - user_id
+        - key
+        - status
+        - name
+        - expired_time
+        - remain_quota
+        - unlimited_quota
+        - model_limits_enabled
+        - model_limits
+        - allow_ips
+        - group
+        - cross_group_retry
+        - deleted_at
+datasets:
+  channels:
+    primary_key: id
+    schema:
+      id:
+        type: int
+        required: true
+      type:
+        type: int
+        required: true
+      key:
+        type: secret
+        required: true
+      status:
+        type: int
+        required: true
+      name:
+        type: string
+        required: true
+      weight:
+        type: int
+        required: true
+        nullable: true
+      base_url:
+        type: string
+        required: true
+        nullable: true
+      models:
+        type: string
+        required: true
+      group:
+        type: string
+        required: true
+      model_mapping:
+        type: json
+        required: true
+        nullable: true
+      priority:
+        type: int
+        required: true
+        nullable: true
+      channel_info:
+        type: json
+        required: true
+    dropped:
+    - openai_organization
+    - test_model
+    - created_time
+    - test_time
+    - response_time
+    - other
+    - balance
+    - balance_updated_time
+    - used_quota
+    - status_code_mapping
+    - auto_ban
+    - other_info
+    - tag
+    - setting
+    - param_override
+    - header_override
+    - remark
+    - settings
+    bindings:
+      database:
+        table: channels
+  users:
+    primary_key: id
+    schema:
+      id:
+        type: int
+        required: true
+      username:
+        type: string
+        required: true
+      display_name:
+        type: string
+        required: true
+      role:
+        type: int
+        required: true
+      status:
+        type: int
+        required: true
+      email:
+        type: string
+        required: true
+      group:
+        type: string
+        required: true
+      deleted_at:
+        type: timestamp
+        required: true
+        nullable: true
+    dropped:
+    - password
+    - github_id
+    - discord_id
+    - oidc_id
+    - wechat_id
+    - telegram_id
+    - access_token
+    - quota
+    - used_quota
+    - request_count
+    - aff_code
+    - aff_count
+    - aff_quota
+    - aff_history
+    - inviter_id
+    - linux_do_id
+    - setting
+    - remark
+    - stripe_customer
+    - created_at
+    - last_login_at
+    bindings:
+      database:
+        table: users
+  tokens:
+    primary_key: id
+    schema:
+      id:
+        type: int
+        required: true
+      user_id:
+        type: int
+        required: true
+      key:
+        type: secret
+        required: true
+      status:
+        type: int
+        required: true
+      name:
+        type: string
+        required: true
+      expired_time:
+        type: int
+        required: true
+      remain_quota:
+        type: int
+        required: true
+      unlimited_quota:
+        type: bool
+        required: true
+      model_limits_enabled:
+        type: bool
+        required: true
+      model_limits:
+        type: string
+        required: true
+      allow_ips:
+        type: string
+        required: true
+        nullable: true
+      group:
+        type: string
+        required: true
+      cross_group_retry:
+        type: bool
+        required: true
+      deleted_at:
+        type: timestamp
+        required: true
+        nullable: true
+    dropped:
+    - created_time
+    - accessed_time
+    - used_quota
+    bindings:
+      database:
+        table: tokens

@@ -1,0 +1,3 @@
+target: memory-test
+type: memory
+state_dsn_env: MIGRATOR_STATE_DSN
