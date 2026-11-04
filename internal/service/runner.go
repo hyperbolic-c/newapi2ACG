@@ -8,7 +8,7 @@ import (
 )
 
 // Repository is implemented by the PG state store. Save must atomically persist
-// state; it must not reset checkpoints or replace the source mirror.
+// state; it must not reset checkpoints or queues.
 type Repository interface {
 	Load(context.Context, string) (JobState, error)
 	Save(context.Context, string, JobState) error

@@ -6,26 +6,26 @@ import "fmt"
 type State string
 
 const (
-	Precheck     State = "PRECHECK"
-	Snapshotting State = "SNAPSHOTTING"
-	CatchingUp   State = "CATCHING_UP"
-	Streaming    State = "STREAMING"
-	Polling      State = "POLLING"
-	Paused       State = "PAUSED"
-	Stopped      State = "STOPPED"
+	Precheck  State = "PRECHECK"
+	FullSync  State = "FULL_SYNC"
+	Streaming State = "STREAMING"
+	Polling   State = "POLLING"
+	Paused    State = "PAUSED"
+	Stopped   State = "STOPPED"
 )
 
 type Event string
 
 const (
-	PrecheckPassed    Event = "precheck_passed"
-	SnapshotCollected Event = "snapshot_collected"
-	ActivateStream    Event = "activate_stream"
-	ActivatePoll      Event = "activate_poll"
-	Pause             Event = "pause"
-	Resume            Event = "resume"
-	Stop              Event = "stop"
-	Restart           Event = "restart"
+	PrecheckPassed Event = "precheck_passed"
+	// FullSyncDone moves to STREAMING (binlog source); FullSyncDonePoll moves
+	// to POLLING (sources without a change stream), design 8.1.
+	FullSyncDone     Event = "full_sync_done"
+	FullSyncDonePoll Event = "full_sync_done_poll"
+	Pause            Event = "pause"
+	Resume           Event = "resume"
+	Stop             Event = "stop"
+	Restart          Event = "restart"
 )
 
 type JobState struct {
@@ -36,7 +36,7 @@ type JobState struct {
 
 func active(state State) bool {
 	switch state {
-	case Precheck, Snapshotting, CatchingUp, Streaming, Polling:
+	case Precheck, FullSync, Streaming, Polling:
 		return true
 	}
 	return false
@@ -102,18 +102,14 @@ func Transition(current JobState, event Event) (JobState, error) {
 		}
 	case PrecheckPassed:
 		if current.State == Precheck {
-			return JobState{State: Snapshotting}, nil
+			return JobState{State: FullSync}, nil
 		}
-	case SnapshotCollected:
-		if current.State == Snapshotting {
-			return JobState{State: CatchingUp}, nil
-		}
-	case ActivateStream:
-		if current.State == CatchingUp {
+	case FullSyncDone:
+		if current.State == FullSync {
 			return JobState{State: Streaming}, nil
 		}
-	case ActivatePoll:
-		if current.State == CatchingUp {
+	case FullSyncDonePoll:
+		if current.State == FullSync {
 			return JobState{State: Polling}, nil
 		}
 	}

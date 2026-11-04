@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -45,9 +44,10 @@ func spyTx(s *stateSpy) *Tx {
 func TestStateValidationPoisonsTransaction(t *testing.T) {
 	s := &stateSpy{}
 	tx := spyTx(s)
-	err := tx.ApplyMirror(1, []state.RowChange{{Dataset: "users", Key: "1", Data: map[string]any{"name": "a"}}, {Dataset: "", Key: "2"}})
+	valid := contract.Group("group:a", "a").Metadata.SourceIdentity
+	err := tx.Enqueue([]model.Identity{valid, {}}, "source_change")
 	if err == nil {
-		t.Fatal("invalid row accepted")
+		t.Fatal("invalid identity accepted")
 	}
 	if tx.Commit() == nil || s.committed || !s.rolledBack {
 		t.Fatal("partial transaction committed")
@@ -56,7 +56,7 @@ func TestStateValidationPoisonsTransaction(t *testing.T) {
 func TestStateDatabaseErrorSanitized(t *testing.T) {
 	s := &stateSpy{fail: true}
 	tx := spyTx(s)
-	err := tx.Advance(1, "uuid:1-2")
+	err := tx.Advance("uuid:1-2")
 	if err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatal("error exposed driver details")
 	}
@@ -93,13 +93,33 @@ func TestIntentRejectsDuplicateIDs(t *testing.T) {
 	}
 }
 
-func TestMirrorDecodePreservesLargeIntegers(t *testing.T) {
-	row, err := decodeMirror("users", "1", []byte(`{"quota":9007199254740993}`), []byte(`{}`))
-	if err != nil {
+func TestFullSyncStartResetsPosition(t *testing.T) {
+	s := &stateSpy{}
+	tx := spyTx(s)
+	if err := tx.SetFullSyncStart("uuid:1-5"); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(row.Data["quota"]) != "9007199254740993" {
-		t.Fatal("mirror integer lost precision")
+	if !strings.Contains(s.queries[0], "gtid_set) VALUES($1,$2,$2)") || s.args[0][1] != "uuid:1-5" {
+		t.Fatalf("G0 must also become the incremental start: %s %v", s.queries[0], s.args[0])
+	}
+}
+
+// zeroRowsSpy reports that an UPDATE matched nothing.
+type zeroRowsSpy struct{ stateSpy }
+
+func (s *zeroRowsSpy) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	_, _ = s.stateSpy.ExecContext(ctx, q, args...)
+	return affectedRows(0), nil
+}
+
+func TestAdvanceRequiresRecordedFullSyncStart(t *testing.T) {
+	s := &zeroRowsSpy{}
+	tx := &Tx{ctx: context.Background(), sql: s, job: "job", target: "target"}
+	if err := tx.Advance("uuid:1-9"); err == nil || !strings.Contains(err.Error(), "full sync") {
+		t.Fatalf("advance without a checkpoint row accepted: %v", err)
+	}
+	if tx.Commit() == nil || s.committed {
+		t.Fatal("transaction committed after failed advance")
 	}
 }
 

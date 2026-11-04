@@ -38,9 +38,15 @@ func TestMigrationTransaction(t *testing.T) {
 		t.Fatal("not committed")
 	}
 	joined := strings.Join(f.calls, "\n")
-	for _, name := range []string{"jobs", "generations", "checkpoints", "mirror_rows", "deps", "pending", "naming_registry", "id_map", "last_applied", "key_access", "operations", "failed_items", "target_snapshots", "config_versions", "audit_log"} {
+	for _, name := range []string{"jobs", "checkpoints", "pending", "naming_registry", "id_map", "last_applied", "key_access", "operations", "failed_items", "target_snapshots", "config_versions", "audit_log"} {
 		if !strings.Contains(joined, "CREATE TABLE migrator."+name+" (") {
 			t.Errorf("missing %s", name)
+		}
+	}
+	// design v3.3: no copy of New API data is kept in the state schema.
+	for _, removed := range []string{"mirror_rows", "generations", "deps"} {
+		if strings.Contains(joined, "migrator."+removed) {
+			t.Errorf("source-copy table %s must not exist", removed)
 		}
 	}
 	if !strings.Contains(f.calls[0], "pg_advisory_xact_lock") {

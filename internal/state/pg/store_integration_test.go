@@ -22,9 +22,6 @@ func integrationStore(t *testing.T) (*Store, *sql.DB) {
 	if _, err := db.Exec("INSERT INTO migrator.jobs(job_id) VALUES ('job'),('other')"); err != nil {
 		t.Fatal("create test jobs failed")
 	}
-	if _, err := db.Exec("INSERT INTO migrator.generations(job_id,generation,status) VALUES ('job',1,'collecting'),('other',1,'collecting')"); err != nil {
-		t.Fatal("create test generations failed")
-	}
 	return &Store{DB: db}, db
 }
 func beginState(t *testing.T, s *Store) state.Transaction {
@@ -42,47 +39,62 @@ func requireCommit(t *testing.T, tx state.Transaction) {
 		t.Fatal(err)
 	}
 }
-func mirrorChange() []state.RowChange {
-	return []state.RowChange{{Dataset: "users", Key: "1", Data: map[string]any{"username": "alice"}}}
+func queuedID() model.Identity {
+	return contract.Group("group:a", "a").Metadata.SourceIdentity
+}
+func pendingCount(t *testing.T, tx state.Transaction) int {
+	t.Helper()
+	items, err := tx.TakePending(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(items)
 }
 func TestRollbackDoesNotAdvance(t *testing.T) {
 	s, _ := integrationStore(t)
-	tx := beginState(t, s)
-	if err := tx.ApplyMirror(1, mirrorChange()); err != nil {
+	start := beginState(t, s)
+	if err := start.SetFullSyncStart("uuid:1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Advance(1, "uuid:1"); err != nil {
+	requireCommit(t, start)
+	tx := beginState(t, s)
+	if err := tx.Enqueue([]model.Identity{queuedID()}, "source_change"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Advance("uuid:1-2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	read := beginState(t, s)
-	row, err := read.ReadMirror(1, "users", "1")
-	if err != nil || row != nil {
-		t.Fatal("rollback retained mirror")
+	if pendingCount(t, read) != 0 {
+		t.Fatal("rollback retained queued resource")
 	}
-	pos, err := read.Position(1)
-	if err != nil || pos != "" {
-		t.Fatal("rollback advanced checkpoint")
+	pos, err := read.Position()
+	if err != nil || pos != "uuid:1" {
+		t.Fatalf("rollback changed position: %q %v", pos, err)
 	}
 }
-func TestMirrorAndCheckpointAtomic(t *testing.T) {
+func TestEnqueueAndCheckpointAtomic(t *testing.T) {
 	s, _ := integrationStore(t)
-	tx := beginState(t, s)
-	if err := tx.ApplyMirror(1, mirrorChange()); err != nil {
+	start := beginState(t, s)
+	if err := start.SetFullSyncStart("uuid:1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Advance(1, "uuid:1-2"); err != nil {
+	requireCommit(t, start)
+	tx := beginState(t, s)
+	if err := tx.Enqueue([]model.Identity{queuedID()}, "source_change"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Advance("uuid:1-2"); err != nil {
 		t.Fatal(err)
 	}
 	before := beginState(t, s)
-	row, err := before.ReadMirror(1, "users", "1")
-	if err != nil || row != nil {
-		t.Fatal("uncommitted mirror visible")
+	if pendingCount(t, before) != 0 {
+		t.Fatal("uncommitted queue entry visible")
 	}
-	pos, err := before.Position(1)
-	if err != nil || pos != "" {
+	if pos, err := before.Position(); err != nil || pos != "uuid:1" {
 		t.Fatal("uncommitted position visible")
 	}
 	if err := before.Rollback(); err != nil {
@@ -90,22 +102,26 @@ func TestMirrorAndCheckpointAtomic(t *testing.T) {
 	}
 	requireCommit(t, tx)
 	read := beginState(t, s)
-	row, err = read.ReadMirror(1, "users", "1")
-	if err != nil || row == nil || row.Data["username"] != "alice" {
-		t.Fatal("committed mirror missing")
+	if pendingCount(t, read) != 1 {
+		t.Fatal("committed queue entry missing")
 	}
-	pos, err = read.Position(1)
-	if err != nil || pos != "uuid:1-2" {
-		t.Fatal("committed checkpoint missing")
+	if pos, err := read.Position(); err != nil || pos != "uuid:1-2" {
+		t.Fatal("committed position missing")
 	}
 	other, err := s.Begin(context.Background(), "other", "target")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = other.Rollback() }()
-	row, err = other.ReadMirror(1, "users", "1")
-	if err != nil || row != nil {
-		t.Fatal("mirror crossed job scope")
+	if pos, err := other.Position(); err != nil || pos != "" {
+		t.Fatal("position crossed job scope")
+	}
+}
+func TestAdvanceWithoutFullSyncStartFails(t *testing.T) {
+	s, _ := integrationStore(t)
+	tx := beginState(t, s)
+	if err := tx.Advance("uuid:1-2"); err == nil {
+		t.Fatal("advance accepted before full sync recorded G0")
 	}
 }
 func TestDequeueSkipsReenqueued(t *testing.T) {

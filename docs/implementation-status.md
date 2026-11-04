@@ -20,8 +20,8 @@
 | 定期核对 | 未开始 | |
 | 配置读取与校验 | 已完成 | 严格校验 YAML（未知字段报错、策略取值检查、只允许通过环境变量名引用密码）；支持 K8s ConfigMap 挂载的目录 |
 | 密钥保护 | 已完成 | 密钥在打印、日志、JSON 中一律为 `***`；存储时只存加盐哈希 |
-| 服务自己的 PG 库 | 代码完成，未连真实库；**待纠偏** | 自动建表；任务锁；待写入队列、写入记录的读写。按 v3.2 实现的源数据副本相关表与方法将删除 |
-| 任务状态与 `migrator run` | 代码完成，未连真实库；**待纠偏** | 记录任务处于哪个阶段，重启后接着执行；预检尚未实现，任务停在 `PRECHECK`。状态 SNAPSHOTTING、CATCHING\_UP 将合并为 FULL\_SYNC |
+| 服务自己的 PG 库 | 代码完成，未连真实库 | 自动建表；任务锁；binlog 位置（全量开始位置 G0 与增量已处理位置）、待写入队列、写入记录的读写。不保存 New API 数据副本 |
+| 任务状态与 `migrator run` | 代码完成，未连真实库 | 阶段：PRECHECK（预检）→ FULL\_SYNC（全量）→ STREAMING（增量）/ POLLING（周期全量），以及 PAUSED、STOPPED；重启后接着执行。预检尚未实现，任务停在 `PRECHECK` |
 | 工程与检查 | 已完成 | Git 仓库已推送；golangci-lint、gitleaks 密钥扫描、单元测试均通过 |
 
 ## 最近一次检查结果
@@ -42,6 +42,15 @@
 MIGRATOR_TEST_PG_DSN='postgres://...' go test -tags=integration ./internal/state/pg/... ./cmd/migrator/...
 ```
 
+## 纠偏记录（2026-11-04）
+
+按 design v3.3 删除了按旧设计实现的“在 PG 保存 New API 数据副本”的代码：
+
+- 建表脚本去掉 `mirror_rows`、`deps`、`generations` 三张表和 `jobs.active_generation`；`checkpoints` 改为每个任务一行（`g0`、`gtid_set`）。尚无任何部署，直接修改了 001 脚本。测试会检查这三张表不再出现。
+- `internal/state` 删除 `RowChange`、`MirrorRow`、`ApplyMirror`、`ReadMirror`；位置接口改为 `SetFullSyncStart(g0)`、`Advance(pos)`、`Position()`。`Advance` 在没有记录 G0 时报错，防止未全量就开始增量。
+- 任务状态 SNAPSHOTTING、CATCHING\_UP 合并为 FULL\_SYNC。
+- 相关单元测试与集成测试已改写；全部检查通过（集成测试仍只编译）。
+
 ## 已知问题与限制
 
 - **旧进程迟到写入**：一个进程失去任务锁后，最长约 2 秒（检测间隔 + 超时）才发现并停止，这期间它仍可能写服务自己的 PG 库。可改进为：每次写入时在 SQL 里确认本进程仍持有锁。尚未实现。
@@ -52,10 +61,9 @@ MIGRATOR_TEST_PG_DSN='postgres://...' go test -tags=integration ./internal/state
 
 ## 下一步
 
-1. 纠偏：按[开发计划](plans/2026-11-04-newapi-to-acg-implementation.md)“纠偏”一节删除偏离 v3.3 的代码。
-2. 编写并实现“读取：从 MySQL 全量读出与按条件查询 New API 数据”。
-3. 编写“转换：规则引擎与 New API 映射规则”的计划。
-4. 有测试库时运行全部 `integration` 测试。
+1. 编写并实现“读取：从 MySQL 全量读出与按条件查询 New API 数据”。
+2. 编写“转换：规则引擎与 New API 映射规则”的计划。
+3. 有测试库时运行全部 `integration` 测试。
 
 ## 开发环境
 

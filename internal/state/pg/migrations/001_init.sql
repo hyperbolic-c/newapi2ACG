@@ -1,47 +1,22 @@
--- Credentials must be removed before persistence. JSONB fields hold only
--- contract data, fingerprints, or redacted resource snapshots.
+-- The service keeps no copy of New API data (design v3.3, 8.7). Credentials
+-- are never stored; JSONB holds redacted resource content and salted hashes.
 CREATE TABLE migrator.jobs (
  job_id text PRIMARY KEY,
  definition jsonb NOT NULL DEFAULT '{}',
- state text NOT NULL DEFAULT 'PRECHECK' CHECK (state IN ('PRECHECK','SNAPSHOTTING','CATCHING_UP','STREAMING','POLLING','PAUSED','STOPPED')),
+ state text NOT NULL DEFAULT 'PRECHECK' CHECK (state IN ('PRECHECK','FULL_SYNC','STREAMING','POLLING','PAUSED','STOPPED')),
  resume_from text, reason text,
- active_generation bigint,
  config_hash text,
  initial_sync_completed_at timestamptz,
  last_reconciliation jsonb,
  updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE TABLE migrator.generations (
- job_id text NOT NULL REFERENCES migrator.jobs(job_id),
- generation bigint NOT NULL CHECK (generation > 0),
- g0 text NOT NULL DEFAULT '', g1 text,
- status text NOT NULL CHECK (status IN ('collecting','collected','catching_up','ready','active','abandoned')),
- created_at timestamptz NOT NULL DEFAULT now(),
- PRIMARY KEY (job_id,generation)
-);
-CREATE UNIQUE INDEX generations_one_active ON migrator.generations(job_id) WHERE status = 'active';
-ALTER TABLE migrator.jobs ADD CONSTRAINT jobs_active_generation_fk
- FOREIGN KEY (job_id,active_generation) REFERENCES migrator.generations(job_id,generation) DEFERRABLE INITIALLY DEFERRED;
+-- One row per job: g0 is the binlog position recorded before the full read;
+-- gtid_set is the position incremental sync has processed up to.
 CREATE TABLE migrator.checkpoints (
- job_id text NOT NULL, generation bigint NOT NULL,
- gtid_set text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now(),
- PRIMARY KEY(job_id,generation),
- FOREIGN KEY(job_id,generation) REFERENCES migrator.generations(job_id,generation)
+ job_id text PRIMARY KEY REFERENCES migrator.jobs(job_id),
+ g0 text NOT NULL DEFAULT '', gtid_set text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE TABLE migrator.mirror_rows (
- job_id text NOT NULL, generation bigint NOT NULL, dataset text NOT NULL, pk text NOT NULL,
- data jsonb NOT NULL, secret_fingerprints jsonb NOT NULL DEFAULT '{}',
- PRIMARY KEY(job_id,generation,dataset,pk),
- FOREIGN KEY(job_id,generation) REFERENCES migrator.generations(job_id,generation)
-);
-CREATE TABLE migrator.deps (
- job_id text NOT NULL, generation bigint NOT NULL,
- dataset text NOT NULL, pk text NOT NULL,
- dependency_kind text NOT NULL, dependency_key text NOT NULL, source_identity text NOT NULL,
- PRIMARY KEY(job_id,generation,dataset,pk,dependency_kind,dependency_key,source_identity),
- FOREIGN KEY(job_id,generation) REFERENCES migrator.generations(job_id,generation)
-);
-CREATE INDEX deps_reverse ON migrator.deps(job_id,generation,dependency_kind,dependency_key);
 -- Global sequence prevents version reuse after dequeue/re-enqueue (ABA).
 CREATE SEQUENCE migrator.pending_version_seq AS bigint;
 CREATE TABLE migrator.pending (

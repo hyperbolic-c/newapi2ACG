@@ -8,8 +8,8 @@ func TestTransitionsFollowTable(t *testing.T) {
 		event Event
 		want  State
 	}{
-		{Precheck, PrecheckPassed, Snapshotting}, {Snapshotting, SnapshotCollected, CatchingUp},
-		{CatchingUp, ActivateStream, Streaming}, {CatchingUp, ActivatePoll, Polling},
+		{Precheck, PrecheckPassed, FullSync},
+		{FullSync, FullSyncDone, Streaming}, {FullSync, FullSyncDonePoll, Polling},
 		{Streaming, Pause, Paused}, {Polling, Stop, Stopped},
 	}
 	for _, tc := range cases {
@@ -21,7 +21,7 @@ func TestTransitionsFollowTable(t *testing.T) {
 	for _, tc := range []struct {
 		state State
 		event Event
-	}{{Precheck, ActivateStream}, {Snapshotting, ActivatePoll}, {Stopped, ActivateStream}, {Paused, PrecheckPassed}, {Streaming, PrecheckPassed}} {
+	}{{Precheck, FullSyncDone}, {Streaming, FullSyncDonePoll}, {Stopped, FullSyncDone}, {Paused, PrecheckPassed}, {Streaming, PrecheckPassed}} {
 		if _, err := Transition(JobState{State: tc.state}, tc.event); err == nil {
 			t.Errorf("accepted %s + %s", tc.state, tc.event)
 		}
@@ -52,8 +52,8 @@ func TestStopRestartPreservesCheckpointPhase(t *testing.T) {
 	}
 }
 func TestTransitionOutputsValidate(t *testing.T) {
-	states := []State{Precheck, Snapshotting, CatchingUp, Streaming, Polling, Paused, Stopped}
-	events := []Event{PrecheckPassed, SnapshotCollected, ActivateStream, ActivatePoll, Pause, Resume, Stop, Restart}
+	states := []State{Precheck, FullSync, Streaming, Polling, Paused, Stopped}
+	events := []Event{PrecheckPassed, FullSyncDone, FullSyncDonePoll, Pause, Resume, Stop, Restart}
 	seen := []JobState{{State: Precheck}}
 	for i := 0; i < len(seen); i++ {
 		if err := seen[i].Validate(); err != nil {

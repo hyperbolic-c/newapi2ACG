@@ -29,7 +29,7 @@ func TestMigrateFromEmpty(t *testing.T) {
 	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"jobs", "generations", "checkpoints", "mirror_rows", "deps", "pending", "naming_registry", "id_map", "last_applied", "key_access", "operations", "failed_items", "target_snapshots", "config_versions", "audit_log"} {
+	for _, name := range []string{"jobs", "checkpoints", "pending", "naming_registry", "id_map", "last_applied", "key_access", "operations", "failed_items", "target_snapshots", "config_versions", "audit_log"} {
 		var exists bool
 		if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='migrator' AND table_name=$1)", name).Scan(&exists); err != nil || !exists {
 			t.Errorf("missing table %s", name)

@@ -95,10 +95,10 @@ func TestJobRepositorySaveValidatesBeforeWrite(t *testing.T) {
 	if err := r.Save(context.Background(), "job", service.JobState{State: service.Paused}); err == nil || f.updates != 0 {
 		t.Fatal("invalid state written")
 	}
-	if err := r.Save(context.Background(), "job", service.JobState{State: service.Paused, ResumeFrom: service.Snapshotting, Reason: "manual"}); err != nil {
+	if err := r.Save(context.Background(), "job", service.JobState{State: service.Paused, ResumeFrom: service.FullSync, Reason: "manual"}); err != nil {
 		t.Fatal(err)
 	}
-	if f.lastSaved != (jobRow{state: "PAUSED", resumeFrom: "SNAPSHOTTING", reason: "manual"}) {
+	if f.lastSaved != (jobRow{state: "PAUSED", resumeFrom: "FULL_SYNC", reason: "manual"}) {
 		t.Fatalf("unexpected row %+v", f.lastSaved)
 	}
 }

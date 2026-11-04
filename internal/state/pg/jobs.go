@@ -46,8 +46,8 @@ func (s sqlJobs) update(ctx context.Context, job string, row jobRow) (int64, err
 }
 
 // JobRepository persists the service state machine in migrator.jobs. It only
-// touches state, resume_from and reason; checkpoints, generations and the
-// mirror are owned by other components and are never reset here.
+// touches state, resume_from and reason; checkpoints and queues are owned by
+// other components and are never reset here.
 type JobRepository struct{ sql jobSQL }
 
 var _ service.Repository = (*JobRepository)(nil)

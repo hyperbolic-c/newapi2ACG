@@ -1,23 +1,12 @@
-// Package state defines the short-transaction persistence boundary. Source
-// adapters must strip secret columns before constructing mirror changes.
+// Package state defines the short-transaction persistence boundary. The
+// service stores only sync state (binlog position, queue, write log, last
+// written content); it never stores a copy of source data (design v3.3).
 package state
 
 import (
 	"github.com/hyperbolic-c/newapi2ACG/internal/model"
 )
 
-type RowChange struct {
-	Dataset            string
-	Key                string
-	Delete             bool
-	Data               map[string]any
-	SecretFingerprints map[string]string
-}
-type MirrorRow struct {
-	Dataset, Key       string
-	Data               map[string]any
-	SecretFingerprints map[string]string
-}
 type PendingItem struct {
 	Identity model.Identity
 	Version  int64

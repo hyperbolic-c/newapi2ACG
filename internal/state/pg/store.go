@@ -1,7 +1,6 @@
 package pg
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -101,90 +100,30 @@ func (t *Tx) Rollback() error {
 	return nil
 }
 
-var fingerprintRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// hexDigestRE matches a full SHA-256 / HMAC-SHA256 hex digest.
+var hexDigestRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func (t *Tx) ApplyMirror(gen int64, changes []state.RowChange) error {
-	if err := t.ready(); err != nil {
+func (t *Tx) SetFullSyncStart(g0 string) error {
+	_, err := t.exec(`INSERT INTO migrator.checkpoints(job_id,g0,gtid_set) VALUES($1,$2,$2) ON CONFLICT(job_id) DO UPDATE SET g0=EXCLUDED.g0,gtid_set=EXCLUDED.gtid_set,updated_at=now()`, t.job, g0)
+	return err
+}
+func (t *Tx) Advance(pos string) error {
+	r, err := t.exec(`UPDATE migrator.checkpoints SET gtid_set=$2,updated_at=now() WHERE job_id=$1`, t.job, pos)
+	if err != nil {
 		return err
 	}
-	if gen <= 0 {
-		return t.fail("invalid mirror generation")
-	}
-	for _, c := range changes {
-		if c.Dataset == "" || c.Key == "" {
-			return t.fail("mirror dataset and key are required")
-		}
-		if c.Delete {
-			if _, err := t.exec("DELETE FROM migrator.mirror_rows WHERE job_id=$1 AND generation=$2 AND dataset=$3 AND pk=$4", t.job, gen, c.Dataset, c.Key); err != nil {
-				return err
-			}
-			continue
-		}
-		if c.Data == nil {
-			return t.fail("mirror data is required")
-		}
-		for _, fp := range c.SecretFingerprints {
-			if !fingerprintRE.MatchString(fp) {
-				return t.fail("invalid mirror secret fingerprint")
-			}
-		}
-		data, err := json.Marshal(c.Data)
-		if err != nil {
-			return t.fail("invalid mirror data")
-		}
-		fps := c.SecretFingerprints
-		if fps == nil {
-			fps = map[string]string{}
-		}
-		hashes, _ := json.Marshal(fps)
-		_, err = t.exec(`INSERT INTO migrator.mirror_rows(job_id,generation,dataset,pk,data,secret_fingerprints) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb) ON CONFLICT(job_id,generation,dataset,pk) DO UPDATE SET data=EXCLUDED.data,secret_fingerprints=EXCLUDED.secret_fingerprints`, t.job, gen, c.Dataset, c.Key, string(data), string(hashes))
-		if err != nil {
-			return err
-		}
+	if n, err := r.RowsAffected(); err != nil || n != 1 {
+		// Incremental sync must not start without a recorded full-sync start.
+		return t.fail("binlog position advanced before full sync recorded its start")
 	}
 	return nil
 }
-func (t *Tx) ReadMirror(gen int64, dataset, key string) (*state.MirrorRow, error) {
-	if err := t.ready(); err != nil {
-		return nil, err
-	}
-	var data, fps []byte
-	err := t.sql.QueryRowContext(t.ctx, "SELECT data,secret_fingerprints FROM migrator.mirror_rows WHERE job_id=$1 AND generation=$2 AND dataset=$3 AND pk=$4", t.job, gen, dataset, key).Scan(&data, &fps)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, t.fail("read mirror failed")
-	}
-	r, err := decodeMirror(dataset, key, data, fps)
-	if err != nil {
-		return nil, t.fail("invalid persisted mirror")
-	}
-	return r, nil
-}
-func decodeMirror(dataset, key string, data, fps []byte) (*state.MirrorRow, error) {
-	r := &state.MirrorRow{Dataset: dataset, Key: key}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if decoder.Decode(&r.Data) != nil || json.Unmarshal(fps, &r.SecretFingerprints) != nil {
-		return nil, errors.New("invalid persisted mirror")
-	}
-	return r, nil
-}
-
-func (t *Tx) Advance(gen int64, pos string) error {
-	if gen <= 0 {
-		return t.fail("invalid checkpoint generation")
-	}
-	_, err := t.exec(`INSERT INTO migrator.checkpoints(job_id,generation,gtid_set) VALUES($1,$2,$3) ON CONFLICT(job_id,generation) DO UPDATE SET gtid_set=EXCLUDED.gtid_set,updated_at=now()`, t.job, gen, pos)
-	return err
-}
-func (t *Tx) Position(gen int64) (string, error) {
+func (t *Tx) Position() (string, error) {
 	if err := t.ready(); err != nil {
 		return "", err
 	}
 	var pos string
-	err := t.sql.QueryRowContext(t.ctx, "SELECT gtid_set FROM migrator.checkpoints WHERE job_id=$1 AND generation=$2", t.job, gen).Scan(&pos)
+	err := t.sql.QueryRowContext(t.ctx, "SELECT gtid_set FROM migrator.checkpoints WHERE job_id=$1", t.job).Scan(&pos)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -427,7 +366,7 @@ func (t *Tx) RecordResults(items []state.AppliedResult) error {
 			return t.fail("result belongs to a superseded intent; observe and recompute current state")
 		}
 		if next == "succeeded" {
-			if !fingerprintRE.MatchString(item.ConfigHash) || (res.TargetID == "" && c.Op != model.Delete) {
+			if !hexDigestRE.MatchString(item.ConfigHash) || (res.TargetID == "" && c.Op != model.Delete) {
 				return t.fail("successful result requires config hash and target ID")
 			}
 			id := r.Metadata.SourceIdentity.String()
