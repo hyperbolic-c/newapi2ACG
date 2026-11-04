@@ -6,7 +6,7 @@
 
 **Goal:** 按 `design-v3.3.md` 实现迁移服务。先交付可验证的 MySQL 全量与增量闭环，再补齐其他读取器、运维能力与真实 ACG 适配器。
 
-**Architecture:** 读取 → 转换 → 写入。读取：首次全量一致性读，之后以 MySQL 从库身份订阅 binlog。binlog 消费者由每行变更前后的值确定受影响的 ACG 资源，与 binlog 位置一起写入待写入队列；写入器回源 MySQL 查询这些资源当前的数据，转换后与上次写入内容比较，有变化才通过 ACG 管理接口写入，写前登记、写后记录结果。服务不保存 New API 数据副本（design 二、9.6、11.3）。
+**Architecture:** 读取 → 转换 → 写入。读取：首次全量一致性读，之后以 MySQL 从库身份订阅 binlog；binlog 订阅、全量读取、回源查询都连接 New API 的同一个 MySQL 实例（优先只读从库，design 9.2）。binlog 消费者由每行变更前后的值确定受影响的 ACG 资源，与 binlog 位置一起写入待写入队列；写入器回源 MySQL 查询这些资源当前的数据，转换后与上次写入内容比较，有变化才通过 ACG 管理接口写入，写前登记、写后记录结果。服务不保存 New API 数据副本（design 二、9.6、11.3）。
 
 **Tech Stack:** Go；PostgreSQL；CEL（cel-go）；YAML + JSON Schema；MySQL ROW/FULL/GTID；go-mysql-org/go-mysql replication 与 TiDB parser；Docker Compose；Kubernetes。依赖版本在 Task 0 验证并锁定，本计划不写死版本号。
 
@@ -39,7 +39,7 @@
 | --- | --- | --- |
 | 实际部署的 New API 分支与版本（官方或定制版，见 2026-10-29 会议） | 表结构与能力核对阶段及之后所有涉及表结构的任务 | 业务方 |
 | 生产库脱敏的表结构与样例 | 表结构与能力核对阶段的任务 0.2、0.4 | DBA / 业务方 |
-| MySQL binlog 配置能否满足 design 9.2，第二个 server\_id | binlog 增量同步阶段 | DBA |
+| 确定服务连接的 New API MySQL 实例：优先只读从库，地址指向固定实例（不能是负载均衡地址）；该实例满足 design 9.2（log\_bin、从库需 log\_replica\_updates、ROW/FULL、GTID、binlog 保留时间）；申请 server\_id 和账号权限 | MySQL 全量迁移（预检）、binlog 增量同步 | DBA |
 | ACG 能力逐项结论（design 7.3） | 对接真实 ACG；之前各阶段不受阻塞 | ACG 团队 |
 | design 12.2 中的业务决策 | 对应策略的默认值；不阻塞编码，阻塞生产启用 | 业务方 |
 
@@ -301,8 +301,8 @@
 | 任务 | 内容 | 关键测试 | design |
 | --- | --- | --- | --- |
 | 2.1 字段核对与类型转换 | `source/contract`：缺列阻止、未知列告警、tinyint/JSON/时间转换 | 保留字列名、缺列、未知列、转换失败即报错且不回显原值 | 3.1–3.4 |
-| 2.2 MySQL 全量读取 | `source/mysql`：一个只读一致性读事务读完全部表、主键分页、读取前记录 G0 | 分页不漏行；读取期间并发修改不可见；连接中断即报错 | 3.3、9.4 |
-| 2.3 按条件回源查询 | `source/mysql`：`Query` 在一个一致性读事务里按条件查询（按 ID、按分组、按用户、按模型），密钥以 `secrets.Value` 返回 | 条件生成安全 SQL；结果与全量读取的类型转换一致 | 9.6、11.2 |
+| 2.2 MySQL 全量读取 | `source/mysql`：一个只读一致性读事务读完全部表、主键分页、读取前记录 G0 和所连实例的 `@@server_uuid` | 分页不漏行；读取期间并发修改不可见；连接中断即报错 | 3.3、9.4 |
+| 2.3 按条件回源查询 | `source/mysql`：`Query` 在一个一致性读事务里按条件查询（按 ID、按分组、按用户、按模型），密钥以 `secrets.Value` 返回；每次查询校验 `@@server_uuid` 与记录的实例一致 | 条件生成安全 SQL；结果与全量读取的类型转换一致；实例不一致时报错并暂停任务 | 9.2、9.6、11.2 |
 | 2.4 规则文件解析与表达式 | `mapping/dsl`、`mapping/cel`：字段类型声明、`${}` 写法、成本限制、规则依赖顺序 | 引用不存在的字段在加载时报错并给出路径；循环引用报错 | 4.1–4.2 |
 | 2.5 规则执行 | `mapping/eval`：join、let、when、for\_each、group\_by、ref\_select；`Full` 与 `Compute` | 缺失 / null / 空串三种情况；when 变假时出现在 Removed | 4.1–4.4 |
 | 2.6 New API 映射规则 | `configs/mappings/newapi-to-acg/*`、`configs/lookups/*`、固定样例对照 | 先分组/用户/提供商，再路由，最后授权；覆盖表结构核对阶段准备的样本 | 5.3–5.6 |
@@ -311,6 +311,7 @@
 | 2.9 写入器与崩溃恢复 | `engine/writer.go`、`engine/recovery.go` | 写入登记先于调用 ACG 提交；结果未知时先查 ACG 再决定；回源重算后无变化不写；密码只初始化一次 | 6.1、11.3 |
 | 2.10 全量流程 | `pipeline/full.go`：记录 G0 → 一致性读 → 转换 → 全部资源入队 → 写入器写完 | 首次全量结果等于固定样例；写入中途强杀后重跑，无重复资源 | 8.1、9.4 |
 | 2.11 预览报告 | `report`：路由名、改名清单、不迁移字段、保真度、冲突 | 报告确定且脱敏；dry\_run 切换为真实写入时重新读取 ACG 现状 | 8.1 |
+| 2.12 源库预检 | `source/mysql/precheck.go`：读取 `log_bin`、`log_replica_updates`、`binlog_format`、`binlog_row_image`、`gtid_mode`、`binlog_expire_logs_seconds`、表引擎、账号权限；比较多条连接的 `@@server_uuid` | 每一项不满足都停在 PRECHECK 并给出具体原因；模拟负载均衡（两条连接 uuid 不同）时拒绝 | 8.1、9.2 |
 
 本阶段验收只覆盖读取期间源库不变的情况；源库有并发写入时的正确性由 binlog 增量同步阶段保证。第一份可演示交付物：配置校验 + 五类资源样例对照 + MySQL 全量 + 脱敏预览报告。
 
@@ -321,7 +322,7 @@
 | 任务 | 内容 | 关键测试 | design |
 | --- | --- | --- | --- |
 | 3.1 GTID 集合 | `source/position.go`：解析、包含、合并、差集 | 多 UUID、区间合并、包含判断 | 9.5 |
-| 3.2 事务组装 | `source/mysql/binlog.go`：XID 与 QueryEvent 边界、跨表事务、重连续传 | 回滚事务不输出；只输出完整事务；重连后不重复不遗漏 | 9.3、9.5 |
+| 3.2 事务组装 | `source/mysql/binlog.go`：XID 与 QueryEvent 边界、跨表事务、重连续传；实例配置增加 `access.binlog.server_id`；binlog 连接的 `@@server_uuid` 必须与查询连接一致 | 回滚事务不输出；只输出完整事务；重连后不重复不遗漏；重连到不同实例时拒绝继续 | 9.2、9.3、9.5 |
 | 3.3 列过滤 | `source/mysql/filter.go`：只比较字段清单中的列 | 只改额度的事务只推进位置 | 9.7 |
 | 3.4 DDL 处理 | `source/mysql/ddl.go`：TiDB parser，解析失败按保守策略 | 加列后重新核对通过并继续；缺列进入 PAUSED | 9.7 |
 | 3.5 受影响资源 | `mapping/affected`：由变更前后的值得到资源标识与“分组/用户下全部令牌待重算”标记 | 渠道换组、模型增删、空分组首个渠道、最后一个成员移除、用户启停 | 9.6 |
