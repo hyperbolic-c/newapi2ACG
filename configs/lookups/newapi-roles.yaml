@@ -1,6 +1,0 @@
-# Source enum only; target role mapping is not yet confirmed.
-# new-api/common/constants.go @ bde9b2f44887d34ec54799ae191d50f97914359e
-0: guest
-1: user
-10: admin
-100: root

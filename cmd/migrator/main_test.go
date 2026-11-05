@@ -7,24 +7,31 @@ import (
 	"testing"
 )
 
-func TestValidateCommand(t *testing.T) {
+const example = "../../configs/jobs/newapi-to-acg.yaml"
+
+func TestValidate(t *testing.T) {
 	var out, errs bytes.Buffer
-	code := execute(context.Background(), []string{"validate", "--config-dir", "../../configs"}, &out, &errs)
-	if code != 0 || !strings.Contains(out.String(), "config_hash") || errs.Len() != 0 {
-		t.Fatalf("code=%d out=%s err=%s", code, &out, &errs)
+	if code := execute(context.Background(), []string{"validate", "--config", example}, &out, &errs, func(string) string { return "" }); code != 0 {
+		t.Fatalf("code %d: %s", code, &errs)
+	}
+	if !strings.Contains(out.String(), `"config_hash"`) || !strings.Contains(out.String(), `"tokens"`) {
+		t.Fatalf("output %s", &out)
 	}
 }
-func TestValidateMissingDirectory(t *testing.T) {
+
+func TestRunWithoutEnvironmentFailsWithVariableName(t *testing.T) {
 	var out, errs bytes.Buffer
-	if code := execute(context.Background(), []string{"validate", "--config-dir", t.TempDir() + "/absent"}, &out, &errs); code == 0 || errs.Len() == 0 {
-		t.Fatal("missing configuration accepted")
+	code := execute(context.Background(), []string{"run", "--config", example}, &out, &errs, func(string) string { return "" })
+	if code != 1 || !strings.Contains(errs.String(), "NEWAPI_MYSQL_DSN") {
+		t.Fatalf("code %d: %s", code, &errs)
 	}
 }
-func TestUnknownCommand(t *testing.T) {
+
+func TestUsage(t *testing.T) {
 	var out, errs bytes.Buffer
-	for _, args := range [][]string{nil, {"apply"}} {
-		if code := execute(context.Background(), args, &out, &errs); code != 2 {
-			t.Fatalf("%v: code=%d", args, code)
+	for _, args := range [][]string{nil, {"bogus", "--config", example}, {"validate", "--config", example, "extra"}} {
+		if code := execute(context.Background(), args, &out, &errs, func(string) string { return "" }); code != 2 {
+			t.Errorf("%v: code %d", args, code)
 		}
 	}
 }

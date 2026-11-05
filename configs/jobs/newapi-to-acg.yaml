@@ -1,0 +1,60 @@
+# New API (MySQL) → ACG. Framework stage: the target is the in-memory mock and
+# the mapping is "passthrough" until the ACG API and New API mapping rules are
+# defined (design-core §1.1, §11). Secrets are never written here, only the
+# names of the environment variables that hold them.
+version: 1
+
+job:
+  id: newapi-to-acg
+  enabled: true
+  lease_ttl: 30s
+
+source:
+  type: mysql
+  # go-mysql DSN: user:password@host:port/database. Binlog subscription, the
+  # full read and reconciliation all use this one instance (design-core §5.4).
+  dsn_env: NEWAPI_MYSQL_DSN
+  replication:
+    server_id: 10086          # unique among all replicas of the source
+    position_mode: auto       # gtid when available, otherwise file/position
+  datasets:
+    - name: users
+      table: users
+      primary_key: id
+    - name: tokens
+      table: tokens
+      primary_key: id
+      sensitive_columns: [key]
+    - name: channels
+      table: channels
+      primary_key: id
+      sensitive_columns: [key]
+
+sync:
+  full:
+    enabled: true
+    on_first_run: true
+    batch_size: 500
+    lock_wait_timeout: 10s
+  incremental:
+    enabled: true
+    batch_size: 100
+    max_retries: 5
+  reconcile:
+    enabled: true
+    interval: 24h
+    batch_size: 500
+    delete_policy: report
+
+target:
+  type: mock                  # acg-api once the ACG management API is defined
+  timeout: 30s
+
+state:
+  type: postgres
+  dsn_env: ACG_PG_DSN
+  schema: migration
+  hash_key_env: MIGRATOR_HASH_KEY
+
+mapping:
+  profile: passthrough        # newapi-to-acg once mapping rules are defined

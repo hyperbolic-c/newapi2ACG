@@ -1,6 +1,0 @@
-instance: example
-project: new-api
-access:
-  type: database
-  driver: mysql
-  dsn_env: NEWAPI_EXAMPLE_DSN

@@ -1,83 +1,31 @@
 # 开发进度
 
-更新：2026-11-04。用词说明见 [README](../README.md#几个用词)。
+依据 [design-core.md](../design-core.md) 第十一节的四个阶段。更新：2026-11-05。
 
-服务分三步：**读取** New API 的 MySQL → **转换**成 ACG 资源 → 调用 ACG 管理接口**写入**；同步方式为首次**全量**、之后以从库身份订阅 **binlog 增量**、外加**定期核对**。服务不保存 New API 数据副本，需要关联数据时回源查询（design v3.3）。下表按这个结构列出进度。
-
-## 总览
-
-| 部分 | 状态 | 说明 |
+| 阶段 | 状态 | 说明 |
 | --- | --- | --- |
-| New API 表结构核对 | 源码核对完成，实库核对待办 | 对照上游 v1.0.0-rc.21 源码，三张表共 76 列：34 列迁移，42 列不迁移（额度、日志、运行数据等），逐列原因见 [new-api-schema.md](compatibility/new-api-schema.md)。实际部署是否为定制版、令牌状态等行为尚未在真实实例上验证 |
-| **读取**：从 MySQL 读全量、按条件回源查询、源库预检 | 计划已写，未开始 | [读取：从 MySQL 全量读出与按条件查询 New API 数据](plans/2026-11-04-mysql-read.md)。读取层只依赖字段清单配置；MySQL 访问统一用 go-mysql |
-| **读取**：binlog 增量 | 未开始 | |
-| **转换**：规则引擎与 New API 映射规则 | 未开始 | |
-| **转换**：ACG 资源定义 | 已完成 | 提供商、聚合路由、分组、用户、API key 五类资源的结构、校验、JSON Schema；资源内容哈希用于判断“有没有变” |
-| **写入**：写入流程（对比、排序、写入、崩溃恢复） | 未开始 | 下面“服务自己的 PG 库”已提供它需要的表和事务 |
-| **写入**：模拟 ACG（测试用） | 已完成 | 在内存中模仿 ACG：名称唯一、按授权过滤后选路、可人为注入失败，用于测试 |
-| **写入**：预览输出（dry_run） | 已完成 | 把将要写入的内容输出为文件，密钥显示为 `***` |
-| **写入**：真实 ACG 对接 | 未开始 | 等 ACG 接口定稿 |
-| 定期核对 | 未开始 | |
-| 配置读取与校验 | 已完成 | 严格校验 YAML（未知字段报错、策略取值检查、只允许通过环境变量名引用密码）；支持 K8s ConfigMap 挂载的目录 |
-| 密钥保护 | 已完成 | 密钥在打印、日志、JSON 中一律为 `***`；存储时只存加盐哈希 |
-| 服务自己的 PG 库 | 代码完成，未连真实库 | 自动建表；任务锁；binlog 位置（全量开始位置 G0 与增量已处理位置）、待写入队列、写入记录的读写。不保存 New API 数据副本 |
-| 任务状态与 `migrator run` | 代码完成，未连真实库 | 阶段：PRECHECK（预检）→ FULL\_SYNC（全量）→ STREAMING（增量）/ POLLING（周期全量），以及 PAUSED、STOPPED；重启后接着执行。预检尚未实现，任务停在 `PRECHECK` |
-| 工程与检查 | 已完成 | Git 仓库已推送；golangci-lint、gitleaks 密钥扫描、单元测试均通过 |
+| 一：项目骨架 + 分批全量读取 | 代码完成 | 配置加载与校验；统一事件（`internal/event`）；MySQL 快照：短暂全局读锁对齐 binlog 位置、同一事务内按主键分批读取；Mock 目标 |
+| 二：Binlog 订阅 + PG 检查点 | 代码完成 | go-mysql `replication` 订阅，按事务组装批次（含压缩事务）；DDL 触及同步表即停止；位点丢失转重新全量；PG 三张状态表、租约与写入隔离、检查点与资源对应表同事务提交 |
+| 三：周期对账 + 任务调度 | 代码完成 | 状态机（initializing / snapshotting / catching_up / streaming / reconciling / paused / failed）；对账暂停增量、新快照 P1、与目标比较修复、删除检测（report / delete）、从 P1 继续 |
+| 四：正式对接 ACG | 未开始 | 等待 ACG 数据模型与管理 API；届时实现 `target/acg` 与 New API → ACG 映射规则，替换 `mock` 和 `passthrough` |
 
-## 最近一次检查结果
+## 验证
 
 | 检查 | 结果 |
 | --- | --- |
-| `go test -race -count=1 ./...` | 全部通过 |
-| `go vet ./...`（含 `-tags=integration`） | 通过 |
-| `golangci-lint run`（含 `--build-tags=integration`） | 0 issues |
-| `make leak-scan`（gitleaks + 测试产物扫描） | 无密钥 |
-| JSON Schema 校验（`uv run ... test/schema/check.py`） | 通过 |
-| `migrator validate --config-dir configs` | 通过 |
-| 需要真实 PG 的测试 | **只编译，未运行** |
+| `go test -race ./...` | 通过。同步机制在内存模拟中覆盖：全量期间并发写入、多行事务、目标暂时失败、响应丢失后用 Inspect 确认、状态提交失败后重放不重复、永久错误停止并可人工恢复、断线重连、位点丢失重新全量、DDL 停止、暂停/恢复、对账修复人工改动与删除、对账不被旧数据覆盖、第二实例等待租约、租约丢失停止、密钥不进日志 |
+| `golangci-lint`（两种标记）、`go vet` | 0 issues |
+| 真实 MySQL / PG 集成测试（`tests/integration`） | **只编译，未运行**（本阶段不启动数据库）。有测试库时运行 `make test-integration` |
 
-本阶段按约定不下载、不启动数据库，所以下面这些都还没有在真实数据库上验证过：建表语句、任务锁的互斥、事务回滚与提交、重启后恢复任务状态、`migrator run` 的完整启动。有测试库后运行：
+## 已知限制
 
-```sh
-MIGRATOR_TEST_PG_DSN='postgres://...' go test -tags=integration ./internal/state/pg/... ./cmd/migrator/...
-```
-
-## 纠偏记录（2026-11-04）
-
-按 design v3.3 删除了按旧设计实现的“在 PG 保存 New API 数据副本”的代码：
-
-- 建表脚本去掉 `mirror_rows`、`deps`、`generations` 三张表和 `jobs.active_generation`；`checkpoints` 改为每个任务一行（`g0`、`gtid_set`）。尚无任何部署，直接修改了 001 脚本。测试会检查这三张表不再出现。
-- `internal/state` 删除 `RowChange`、`MirrorRow`、`ApplyMirror`、`ReadMirror`；位置接口改为 `SetFullSyncStart(g0)`、`Advance(pos)`、`Position()`。`Advance` 在没有记录 G0 时报错，防止未全量就开始增量。
-- 任务状态 SNAPSHOTTING、CATCHING\_UP 合并为 FULL\_SYNC。
-- 相关单元测试与集成测试已改写；全部检查通过（集成测试仍只编译）。
-
-## 已知问题与限制
-
-- **旧进程迟到写入**：一个进程失去任务锁后，最长约 2 秒（检测间隔 + 超时）才发现并停止，这期间它仍可能写服务自己的 PG 库。可改进为：每次写入时在 SQL 里确认本进程仍持有锁。尚未实现。
-- `migrator run` 一次只运行一个任务（`--job` 指定，或配置中只有一个任务）。
-- 任务的配置内容只在首次登记时写入 PG，之后修改配置不会更新这份记录（配置热加载属于定期核对阶段）。
-- 预览输出的文件只用于查看，不能用来恢复密钥或恢复模拟 ACG 的状态。
-- 密钥扫描对 `new-api/` 上游源码目录做了排除：该目录不入库，其中 10 处命中都是上游自己的测试样例。
+- 快照对齐 binlog 位置使用 `FLUSH TABLES WITH READ LOCK`，需要 RELOAD 权限；拿不到该权限的云数据库暂不支持。
+- 单列主键分页；复合主键、非索引主键尚未支持（design-core §4.3）。
+- ENUM / SET / BIT 列被预检拒绝。
+- DDL 检测是保守的：语句中出现同步表名即停止，需人工确认后 `recover`（必要时 `--resnapshot`）。
+- 删除检测只考虑本任务创建的资源；`delete_policy` 默认 `report`。
 
 ## 下一步
 
-1. 按[读取计划](plans/2026-11-04-mysql-read.md)实现（第 5 个任务需联网下载 go-mysql 一次）。
-2. 编写“转换：规则引擎与 New API 映射规则”的计划。
-3. 有测试库时运行全部 `integration` 测试。
-
-## 开发环境
-
-Go `go1.26.10 darwin/arm64`。依赖从本机模块缓存离线获取，不关闭校验和检查：
-
-```sh
-export GOPATH=/private/tmp/newapi2acg-gopath
-export GOMODCACHE=/private/tmp/newapi2acg-mod-cache
-export GOCACHE=/private/tmp/newapi2acg-go-cache
-export GOPROXY=file:///Users/liam/go/pkg/mod/cache/download
-```
-
-工具：gitleaks 8.30.1、golangci-lint 2.15.0（Homebrew）。JSON Schema 校验通过 `uv` 临时环境运行，依赖版本见 `test/schema/requirements.txt`。
-
-New API 上游源码放在 `new-api/`，只读参考，对应 commit `bde9b2f44887d34ec54799ae191d50f97914359e`。
-
-详细的逐批开发记录见 Git 历史。
+1. 有测试库时运行集成测试，修正真实环境中的差异。
+2. ACG 数据模型与管理 API 确定后，实现 `target/acg`（Apply / Inspect）和 New API → ACG 映射规则。
